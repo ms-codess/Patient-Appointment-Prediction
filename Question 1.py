@@ -85,10 +85,6 @@ relevant_features = [
     'AwaitingTimeGroup'
 ]
 
-# Check if the relevant features exist in the DataFrame
-missing_features = [feature for feature in relevant_features if feature not in df.columns]
-if missing_features:
-    print(f"Warning: The following features are missing in the DataFrame: {missing_features}")
 
 # Subset the DataFrame to only include relevant features
 df_relevant = df[relevant_features]
@@ -98,18 +94,12 @@ df_relevant = df_relevant.apply(pd.to_numeric, errors='coerce')
 
 # Check for constant columns (all values the same)
 constant_columns = df_relevant.columns[df_relevant.nunique() == 1]
-if constant_columns.any():
-    print(f"Warning: The following columns have constant values and will be dropped: {constant_columns.tolist()}")
-    df_relevant = df_relevant.drop(columns=constant_columns)
+df_relevant = df_relevant.drop(columns=constant_columns)
 
 # Calculate the correlation matrix for relevant features only
 correlation_matrix = df_relevant.corr()
 
-# Check if the correlation matrix is empty
-if correlation_matrix.empty:
-    print("Error: The correlation matrix is empty. Check the input data.")
-else:
-    # Visualize the correlation matrix using a heatmap
+
     plt.figure(figsize=(10, 8))
     sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f", vmin=-1, vmax=1)
     plt.title('Correlation Matrix (Relevant Features Only)')
