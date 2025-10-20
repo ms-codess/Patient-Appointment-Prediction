@@ -54,7 +54,18 @@ def load_model_and_data():
         raise FileNotFoundError(f"Model file not found at {BEST_MODEL_PATH}")
 
     df = pd.read_csv(PROCESSED_DATA_PATH)
-    model = joblib.load(BEST_MODEL_PATH)
+    artifact = joblib.load(BEST_MODEL_PATH)
+
+    if isinstance(artifact, dict) and "model" in artifact:
+        model = artifact["model"]
+        threshold = artifact.get("threshold", 0.5)
+        feature_order = artifact.get("features")
+        model_name = artifact.get("model_name", type(model).__name__)
+    else:
+        model = artifact
+        threshold = 0.5
+        feature_order = None
+        model_name = type(model).__name__
 
     # target column name detection
     if "No-show_encoded" in df.columns:
@@ -67,7 +78,16 @@ def load_model_and_data():
     X = df.drop(columns=[target_col])
     y = df[target_col]
 
-    return model, X, y
+    if feature_order is not None:
+        missing = set(feature_order) - set(X.columns)
+        if missing:
+            raise KeyError(
+                "Dataset is missing expected features required by the model: "
+                f"{sorted(missing)}"
+            )
+        X = X[feature_order]
+
+    return model, threshold, model_name, X, y
 
 # ==============================================
 # 📈 ROC Curve
@@ -149,17 +169,19 @@ def print_detailed_report(y_true, y_pred, y_prob, model_name):
 # ==============================================
 def evaluate_model():
     print("\n🚀 Loading model and data...")
-    model, X, y = load_model_and_data()
+    model, threshold, model_name, X, y = load_model_and_data()
 
     print("\n🔮 Generating predictions...")
     y_prob = model.predict_proba(X)[:, 1]
-    y_pred = (y_prob >= 0.5).astype(int)
+    y_pred = (y_prob >= threshold).astype(int)
 
-    print_detailed_report(y, y_pred, y_prob, "Best Model")
+    print(f"\n⚙️ Using decision threshold: {threshold:.3f}")
+
+    print_detailed_report(y, y_pred, y_prob, model_name)
 
     print("\n📊 Generating visualizations...")
-    plot_roc_curve(y, y_prob, "Best Model")
-    plot_pr_curve(y, y_prob, "Best Model")
+    plot_roc_curve(y, y_prob, model_name)
+    plot_pr_curve(y, y_prob, model_name)
 
     print("\n✅ Evaluation complete. Results saved in 'reports/plots/'")
 
