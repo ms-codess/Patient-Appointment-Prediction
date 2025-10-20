@@ -219,31 +219,8 @@ Models are evaluated using:
    - Remove highly correlated features
    - Select relevant features for modeling
 
-## Results
-
-The best performing model typically achieves:
-- **Accuracy**: ~80-85%
-- **F1-Score**: ~0.4-0.5
-- **Precision**: ~0.3-0.4
-- **Recall**: ~0.6-0.7
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License.
 
 ## Acknowledgments
 
 - Dataset from Kaggle: [Medical Appointment No Shows](https://www.kaggle.com/joniarroba/noshowappointments)
-- University of Ottawa for project support
 
-## Contact
-
-For questions or suggestions, please open an issue in the repository.
