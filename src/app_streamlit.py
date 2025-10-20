@@ -1,9 +1,10 @@
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
 import shap
-import xgboost as xgb
 import re
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -19,6 +20,8 @@ st.title("🏥 Patient No-Show Risk Prediction Dashboard")
 # HELPERS
 # =========================================================
 TARGET_CANDIDATES = ["No-show_encoded", "No-show"]
+MODEL_PATH = Path("models/best_model.joblib")
+DATA_PATH = Path("data/processed/cleaned_dataset.csv")
 
 def detect_target_col(df: pd.DataFrame) -> str:
     for c in TARGET_CANDIDATES:
@@ -36,7 +39,7 @@ def clean_xgb_config_string(cfg: str) -> str:
 
 @st.cache_resource
 def load_model_and_data():
-    bundle = joblib.load("models/best_model.joblib")
+    bundle = joblib.load(MODEL_PATH)
     if isinstance(bundle, dict):
         model = bundle["model"]
         saved_features = bundle.get("features", None)
@@ -44,7 +47,7 @@ def load_model_and_data():
         model = bundle
         saved_features = None
 
-    df = pd.read_csv("data/processed/cleaned_dataset.csv")
+    df = pd.read_csv(DATA_PATH)
     target_col = detect_target_col(df)
 
     if saved_features:
@@ -76,6 +79,20 @@ def get_expected_features(_model, feature_cols):
 # =========================================================
 # LOAD MODEL & DATA
 # =========================================================
+if not MODEL_PATH.exists():
+    st.error(
+        "❌ Trained model artifact not found. Please run the training pipeline to create "
+        f"`{MODEL_PATH}` before launching the dashboard."
+    )
+    st.stop()
+
+if not DATA_PATH.exists():
+    st.error(
+        "❌ Processed dataset not found. Expected to load it from "
+        f"`{DATA_PATH}`. Please preprocess the data first."
+    )
+    st.stop()
+
 model, booster, data, feature_cols, target_col = load_model_and_data()
 if not target_col:
     st.error("❌ Target column not found in dataset.")
@@ -85,6 +102,34 @@ feature_cols = drop_target_cols(feature_cols)
 expected_features = get_expected_features(model, feature_cols)
 expected_features = [c for c in expected_features if c not in TARGET_CANDIDATES]
 background_X = data.reindex(columns=expected_features, fill_value=0)
+feature_index_map = {feat: idx for idx, feat in enumerate(expected_features)}
+
+with st.sidebar:
+    st.header("📂 Dataset Overview")
+    st.metric("Records", f"{len(data):,}")
+    if target_col in data.columns:
+        numeric_target = pd.to_numeric(data[target_col], errors="coerce")
+        if not numeric_target.dropna().empty:
+            no_show_rate = numeric_target.mean()
+            st.metric("No-Show Rate", f"{no_show_rate:.1%}")
+
+    st.caption("Preview of processed features")
+    preview_cols = [c for c in expected_features[:6] if c in data.columns]
+    if target_col and target_col in data.columns:
+        preview_cols.append(target_col)
+    if preview_cols:
+        st.dataframe(data[preview_cols].head(), use_container_width=True)
+    else:
+        st.info("No feature columns available for preview.")
+
+
+def ensure_array(values):
+    """SHAP sometimes returns a list (multi-class). Convert to a 2D numpy array."""
+    if isinstance(values, list):
+        if len(values) > 1:
+            return np.array(values[1])
+        return np.array(values[0])
+    return np.array(values)
 
 # =========================================================
 # MAPPINGS
@@ -158,34 +203,52 @@ tab_predict, tab_explain, tab_performance, tab_about = st.tabs([
 # =========================================================
 with tab_predict:
     st.subheader("👤 Enter Patient Information")
-    user_inputs = {}
-    col1, col2 = st.columns(2)
 
-    for col in ["Gender", "SMS_received", "Scholarship", "Hypertension", "Diabetes", "Alcoholism", "Handicap"]:
-        if col in expected_features:
-            display_name = DISPLAY_RENAME.get(col, col)
-            user_inputs[col] = col1.selectbox(
-                f"{display_name} ❓",
-                list(CATEGORICAL_MAPPINGS[col].keys()),
-                help=FEATURE_EXPLANATIONS[col]
+    if "prediction" not in st.session_state:
+        st.session_state.prediction = None
+
+    with st.form("prediction_form"):
+        user_inputs = {}
+        col1, col2 = st.columns(2)
+
+        for col in ["Gender", "SMS_received", "Scholarship", "Hypertension", "Diabetes", "Alcoholism", "Handicap"]:
+            if col in expected_features:
+                display_name = DISPLAY_RENAME.get(col, col)
+                selection = col1.selectbox(
+                    f"{display_name} ❓",
+                    list(CATEGORICAL_MAPPINGS[col].keys()),
+                    help=FEATURE_EXPLANATIONS[col],
+                    key=f"input_{col}"
+                )
+                user_inputs[col] = CATEGORICAL_MAPPINGS[col][selection]
+
+        if "AgeGroup" in expected_features:
+            age_label = col2.selectbox(
+                "Age Group",
+                list(AGE_GROUP_LABELS.keys()),
+                help=FEATURE_EXPLANATIONS["AgeGroup"],
+                key="input_age"
             )
-            user_inputs[col] = CATEGORICAL_MAPPINGS[col][user_inputs[col]]
+            user_inputs["AgeGroup"] = AGE_GROUP_LABELS[age_label]
 
-    if "AgeGroup" in expected_features:
-        label = col2.selectbox("Age Group", list(AGE_GROUP_LABELS.keys()), help=FEATURE_EXPLANATIONS["AgeGroup"])
-        user_inputs["AgeGroup"] = AGE_GROUP_LABELS[label]
+        if "AwaitingTimeGroup" in expected_features:
+            wait_label = col2.selectbox(
+                "Waiting Time",
+                list(AWAITING_TIME_LABELS.keys()),
+                help=FEATURE_EXPLANATIONS["AwaitingTimeGroup"],
+                key="input_wait"
+            )
+            user_inputs["AwaitingTimeGroup"] = AWAITING_TIME_LABELS[wait_label]
 
-    if "AwaitingTimeGroup" in expected_features:
-        label = col2.selectbox("Waiting Time", list(AWAITING_TIME_LABELS.keys()), help=FEATURE_EXPLANATIONS["AwaitingTimeGroup"])
-        user_inputs["AwaitingTimeGroup"] = AWAITING_TIME_LABELS[label]
+        for col in expected_features:
+            if col not in user_inputs:
+                user_inputs[col] = int(data[col].median()) if col in data.columns else 0
 
-    for col in expected_features:
-        if col not in user_inputs:
-            user_inputs[col] = int(data[col].median()) if col in data.columns else 0
+        user_df = pd.DataFrame([user_inputs])[expected_features]
 
-    user_df = pd.DataFrame([user_inputs])[expected_features]
+        submitted = st.form_submit_button("🚀 Run Prediction", use_container_width=True)
 
-    if st.button("🚀 Run Prediction"):
+    if submitted:
         prob = float(model.predict_proba(user_df)[0, 1])
         label_text = "❌ No-Show" if prob >= 0.5 else "✅ Will Attend"
         risk_level = (
@@ -193,11 +256,28 @@ with tab_predict:
             ("🟡 Medium", "orange") if prob >= 0.4 else
             ("🟢 Low", "green")
         )
+        st.session_state.prediction = {
+            "prob": prob,
+            "label_text": label_text,
+            "risk_level": risk_level,
+        }
+        st.session_state.user_input_df = user_df
+
+    if st.session_state.prediction:
+        pred = st.session_state.prediction
         c1, c2, c3 = st.columns(3)
-        c1.metric("Prediction", label_text)
-        c2.metric("No-Show Probability", f"{prob:.1%}")
-        c3.metric("Risk Level", risk_level[0])
-        st.success(f"✅ Based on the selected information, the predicted risk of no-show is {risk_level[0]}.")
+        c1.metric("Prediction", pred["label_text"])
+        c2.metric("No-Show Probability", f"{pred['prob']:.1%}")
+        c3.metric("Risk Level", pred["risk_level"][0])
+        st.success(
+            "✅ Based on the selected information, the predicted risk of no-show is "
+            f"{pred['risk_level'][0]}."
+        )
+
+        with st.expander("📋 Patient inputs used for this prediction"):
+            display_df = st.session_state.user_input_df.copy()
+            display_df.columns = [DISPLAY_RENAME.get(col, col) for col in display_df.columns]
+            st.dataframe(display_df)
 
 # =========================================================
 # TAB 2 — EXPLAINABILITY (with XGBoost fix)
@@ -205,46 +285,64 @@ with tab_predict:
 with tab_explain:
     st.subheader("🧠 SHAP Explainability")
 
-    explainer = None
-    shap_sample = background_X.sample(min(50, len(background_X)), random_state=42)
+    if not st.session_state.get("prediction"):
+        st.info("Run a prediction from the previous tab to unlock SHAP explanations.")
+    else:
+        user_df = st.session_state.get("user_input_df")
+        if user_df is None:
+            st.warning("Couldn't locate the latest patient inputs. Please re-run a prediction.")
+            st.stop()
 
-    try:
-        booster = model.get_booster()
-        booster.feature_names = expected_features  # ✅ critical line
-        explainer = shap.TreeExplainer(booster)
-        shap_values = explainer.shap_values(shap_sample)
-        user_shap = explainer.shap_values(user_df)
-    except Exception as e:
-        try:
-            ke = shap.KernelExplainer(model.predict_proba, shap_sample)
-            shap_values = ke.shap_values(shap_sample, nsamples=100)
-            user_shap = ke.shap_values(user_df, nsamples=100)
-            explainer = ke
-        except Exception as e2:
-            st.error(f"❌ SHAP failed to initialize: {e2}")
+        if background_X.empty:
+            st.warning("Background data unavailable – cannot compute SHAP values without reference samples.")
+        else:
             explainer = None
+            shap_sample = background_X.sample(min(50, len(background_X)), random_state=42)
 
-    if explainer:
-        shap_importance = np.abs(shap_values).mean(axis=0)
-        top_idx = np.argsort(shap_importance)[::-1][:5]
-        top_features = [expected_features[i] for i in top_idx]
-        top_impacts = shap_importance[top_idx]
+            try:
+                booster = model.get_booster()
+                booster.feature_names = expected_features  # ensure alignment for XGBoost
+                explainer = shap.TreeExplainer(booster)
+                shap_values = explainer.shap_values(shap_sample)
+                user_shap = explainer.shap_values(user_df)
+            except Exception:
+                try:
+                    ke = shap.KernelExplainer(model.predict_proba, shap_sample)
+                    shap_values = ke.shap_values(shap_sample, nsamples=100)
+                    user_shap = ke.shap_values(user_df, nsamples=100)
+                    explainer = ke
+                except Exception as e2:
+                    st.error(f"❌ SHAP failed to initialize: {e2}")
+                    explainer = None
 
-        st.markdown("#### ✨ Top Factors Driving the Prediction:")
-        for feat, impact in zip(top_features, top_impacts):
-            display_name = DISPLAY_RENAME.get(feat, feat)
-            direction = "🔺 increases" if user_shap[0][expected_features.index(feat)] > 0 else "🟩 decreases"
-            st.write(f"- **{display_name}** {direction} the likelihood of no-show (impact: {impact:.2f})")
+            if explainer:
+                shap_values = ensure_array(shap_values)
+                if shap_values.ndim == 1:
+                    shap_values = shap_values.reshape(1, -1)
 
-        with st.expander("🔬 Full SHAP Summary Plot"):
-            fig, ax = plt.subplots(figsize=(10, 5))
-            shap.summary_plot(
-                shap_values,
-                shap_sample,
-                feature_names=[DISPLAY_RENAME.get(f, f) for f in expected_features],
-                show=False
-            )
-            st.pyplot(fig)
+                user_shap = ensure_array(user_shap)
+                user_contrib = user_shap[0] if user_shap.ndim > 1 else user_shap
+
+                shap_importance = np.abs(shap_values).mean(axis=0)
+                top_idx = np.argsort(shap_importance)[::-1][:5]
+                top_features = [expected_features[i] for i in top_idx]
+                top_impacts = shap_importance[top_idx]
+
+                st.markdown("#### ✨ Top Factors Driving the Prediction:")
+                for feat, impact in zip(top_features, top_impacts):
+                    display_name = DISPLAY_RENAME.get(feat, feat)
+                    direction = "🔺 increases" if user_contrib[feature_index_map[feat]] > 0 else "🟩 decreases"
+                    st.write(f"- **{display_name}** {direction} the likelihood of no-show (impact: {impact:.2f})")
+
+                with st.expander("🔬 Full SHAP Summary Plot"):
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    shap.summary_plot(
+                        shap_values,
+                        shap_sample,
+                        feature_names=[DISPLAY_RENAME.get(f, f) for f in expected_features],
+                        show=False
+                    )
+                    st.pyplot(fig)
 
 
 # =========================================================
