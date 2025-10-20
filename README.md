@@ -27,7 +27,28 @@
 | 🧾 Model Management      | [joblib](https://joblib.readthedocs.io/)                          |
 
 ---
+📊 Dataset
 
+This project uses the No-show Medical Appointments
+ dataset from Kaggle, which contains 110,527 appointment records collected from public hospitals in Brazil.
+
+🏥 Key Features:
+
+Gender — Patient gender
+
+Age — Patient age
+
+ScheduledDay / AppointmentDay — When the appointment was booked and when it occurs
+
+Neighbourhood — Location of the hospital
+
+MedicalCoverage (originally Scholarship) — Indicates if the patient receives government health coverage
+
+Hypertension, Diabetes, Alcoholism, Handcap — Health conditions
+
+SMS_received — Whether the patient received a reminder SMS
+
+No-show (Target) — Indicates if the patient attended (No) or missed (Yes) the appointment.
 ## 📂 Project Structure
 
 ```
