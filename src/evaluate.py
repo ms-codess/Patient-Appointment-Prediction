@@ -1,192 +1,134 @@
-"""
-Model evaluation module for Patient Appointment Prediction.
-
-This module provides comprehensive evaluation capabilities for trained models
-including metrics calculation, visualization, and performance analysis.
-"""
-import os
-from pathlib import Path
+#Evaluate
+# ===============================
+# 🧪 Model Evaluation Pipeline
+# ===============================
 import pandas as pd
+import numpy as np
 import joblib
+from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
+    precision_recall_curve,
+    average_precision_score,
+    roc_curve,
+    roc_auc_score,
+    fbeta_score,
     classification_report,
     confusion_matrix,
-    roc_curve,
-    precision_recall_curve,
-    roc_auc_score,
-    average_precision_score,
-    auc
+    precision_score,
+    f1_score # Import f1_score
 )
 
-from dotenv import load_dotenv
+# -------------------------------
+# 1. Paths
+# -------------------------------
+MODEL_DIR = Path("models")
+TEST_PATH = Path("data/processed/test_processed.csv")
+MODEL_PATH = list(MODEL_DIR.glob("*_model_f1.pkl"))[0]  # auto-pick saved model with f1 optimization
+THRESHOLD_PATH = MODEL_DIR / "best_threshold_f1.txt" # Use the F1 optimized threshold
 
-# ==============================================
-# 🧰 Helper: Ensure output directories exist
-# ==============================================
-def ensure_directories():
-    output_dirs = [
-        Path("reports"),
-        Path("reports/plots"),
-        Path("reports/metrics")
-    ]
-    for d in output_dirs:
-        d.mkdir(parents=True, exist_ok=True)
+# -------------------------------
+# 2. Load Data & Model
+# -------------------------------
+print("📥 Loading test data and best model...")
+test_df = pd.read_csv(TEST_PATH)
+model = joblib.load(MODEL_PATH)
 
-# ==============================================
-# 📂 Load model and processed data
-# ==============================================
-def load_model_and_data():
-    load_dotenv()
+with open(THRESHOLD_PATH, "r") as f:
+    threshold = float(f.read().strip())
 
-    PROCESSED_DATA_PATH = Path(os.getenv("PROCESSED_DATA_PATH"))
-    BEST_MODEL_PATH = Path(os.getenv("BEST_MODEL_PATH"))
+X_test = test_df.drop(columns=["No_show_label"])
+y_test = test_df["No_show_label"]
 
-    if not PROCESSED_DATA_PATH.exists():
-        raise FileNotFoundError(f"Processed data file not found at {PROCESSED_DATA_PATH}")
-    if not BEST_MODEL_PATH.exists():
-        raise FileNotFoundError(f"Model file not found at {BEST_MODEL_PATH}")
+print(f"✅ Loaded model: {MODEL_PATH.name}")
+print(f"✅ Threshold used: {threshold:.3f}")
+print(f"✅ Test samples: {len(X_test)}")
 
-    df = pd.read_csv(PROCESSED_DATA_PATH)
-    artifact = joblib.load(BEST_MODEL_PATH)
+# -------------------------------
+# 3. Predictions
+# -------------------------------
+y_prob = model.predict_proba(X_test)[:, 1]
+y_pred = (y_prob >= threshold).astype(int)
 
-    if isinstance(artifact, dict) and "model" in artifact:
-        model = artifact["model"]
-        threshold = artifact.get("threshold", 0.5)
-        feature_order = artifact.get("features")
-        model_name = artifact.get("model_name", type(model).__name__)
-    else:
-        model = artifact
-        threshold = 0.5
-        feature_order = None
-        model_name = type(model).__name__
+# -------------------------------
+# 4. Metrics
+# -------------------------------
+precision, recall, _ = precision_recall_curve(y_test, y_prob)
+pr_auc = average_precision_score(y_test, y_prob)
+roc_auc = roc_auc_score(y_test, y_prob)
+f1 = f1_score(y_test, y_pred) # Calculate F1 score
+current_precision = precision_score(y_test, y_pred) # Calculate precision
 
-    # target column name detection
-    if "No-show_encoded" in df.columns:
-        target_col = "No-show_encoded"
-    elif "No-show" in df.columns:
-        target_col = "No-show"
-    else:
-        raise KeyError("Target column not found in dataset.")
+cm = confusion_matrix(y_test, y_pred)
+tn, fp, fn, tp = cm.ravel()
 
-    X = df.drop(columns=[target_col])
-    y = df[target_col]
+print("\n📊 Evaluation Metrics (Test Set)")
+print(f"  • Precision: {current_precision:.3f}") # Use calculated precision
+print(f"  • Recall: {tp / (tp + fn):.3f}") # Calculate recall
+print(f"  • F1 Score: {f1:.3f}")
+print(f"  • PR AUC: {pr_auc:.3f}")
+print(f"  • ROC AUC: {roc_auc:.3f}")
+print(f"  • Specificity: {tn / (tn + fp):.3f}")
+print(f"  • Sensitivity: {tp / (tp + fn):.3f}")
 
-    if feature_order is not None:
-        missing = set(feature_order) - set(X.columns)
-        if missing:
-            raise KeyError(
-                "Dataset is missing expected features required by the model: "
-                f"{sorted(missing)}"
-            )
-        X = X[feature_order]
+print("\n📈 Classification Report:")
+print(classification_report(y_test, y_pred, target_names=["Show", "No-Show"]))
 
-    return model, threshold, model_name, X, y
+# -------------------------------
+# 5. Confusion Matrix Plot
+# -------------------------------
+plt.figure(figsize=(6, 5))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+            xticklabels=["Show", "No-Show"],
+            yticklabels=["Show", "No-Show"])
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.title("Confusion Matrix (Test Set)")
+plt.tight_layout()
+plt.savefig("confusion_matrix_test.png")
+plt.show()
 
-# ==============================================
-# 📈 ROC Curve
-# ==============================================
-def plot_roc_curve(y_true, y_prob, model_name):
-    ensure_directories()
-    fpr, tpr, _ = roc_curve(y_true, y_prob)
-    roc_auc = auc(fpr, tpr)
+# -------------------------------
+# 6. Precision-Recall Curve
+# -------------------------------
+plt.figure(figsize=(7, 5))
+plt.plot(recall, precision, label=f"PR AUC = {pr_auc:.3f}")
+plt.xlabel("Recall")
+plt.ylabel("Precision")
+plt.title("Precision-Recall Curve")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("precision_recall_curve.png")
+plt.show()
 
-    plt.figure()
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'{model_name} (AUC = {roc_auc:.2f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve')
-    plt.legend(loc="lower right")
-    plt.savefig("reports/plots/roc_curve.png", dpi=300, bbox_inches="tight")
-    plt.close()
+# -------------------------------
+# 7. ROC Curve
+# -------------------------------
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+plt.figure(figsize=(7, 5))
+plt.plot(fpr, tpr, label=f"ROC AUC = {roc_auc:.3f}")
+plt.plot([0, 1], [0, 1], "k--")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("roc_curve.png")
+plt.show()
 
-# ==============================================
-# 📉 Precision-Recall Curve
-# ==============================================
-def plot_pr_curve(y_true, y_prob, model_name):
-    ensure_directories()
-    precision, recall, _ = precision_recall_curve(y_true, y_prob)
-    pr_auc = auc(recall, precision)
+# -------------------------------
+# 8. Insights
+# -------------------------------
+print("\n🧠 **Insights**")
+print(f"  - True Positives (TP): {tp}")
+print(f"  - False Negatives (FN): {fn}")
+print(f"  - True Negatives (TN): {tn}")
+print(f"  - False Positives (FP): {fp}")
+print(f"  - No-show prevalence in test: {y_test.mean():.2%}")
+print(f"  - Predicted no-show rate: {y_pred.mean():.2%}")
 
-    plt.figure()
-    plt.plot(recall, precision, color='purple', lw=2, label=f'{model_name} (AUC = {pr_auc:.2f})')
-    plt.xlabel('Recall')
-    plt.ylabel('Precision')
-    plt.title('Precision-Recall Curve')
-    plt.legend(loc="lower left")
-    plt.savefig("reports/plots/pr_curve.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-# ==============================================
-# 🧮 Compute and print detailed metrics
-# ==============================================
-def print_detailed_report(y_true, y_pred, y_prob, model_name):
-    print("\n📈 Performance Metrics:")
-    print("----------------------------------------")
-    print(f"Accuracy       : {accuracy_score(y_true, y_pred):.4f}")
-    print(f"Precision      : {precision_score(y_true, y_pred):.4f}")
-    print(f"Recall         : {recall_score(y_true, y_pred):.4f}")
-    print(f"F1 Score       : {f1_score(y_true, y_pred):.4f}")
-    print(f"Roc Auc        : {roc_auc_score(y_true, y_prob):.4f}")
-    print(f"Pr Auc         : {average_precision_score(y_true, y_prob):.4f}")
-
-    # Confusion matrix
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-    specificity = tn / (tn + fp)
-    sensitivity = tp / (tp + fn)
-
-    print(f"Specificity    : {specificity:.4f}")
-    print(f"Sensitivity    : {sensitivity:.4f}")
-
-    print("\n🔍 Confusion Matrix Details:")
-    print("----------------------------------------")
-    print(f"True Negatives  (TN): {tn:,}")
-    print(f"False Positives (FP): {fp:,}")
-    print(f"False Negatives (FN): {fn:,}")
-    print(f"True Positives  (TP): {tp:,}")
-
-    print("\n💡 Additional Insights:")
-    print("----------------------------------------")
-    total = len(y_true)
-    actual_positive_rate = y_true.mean() * 100
-    predicted_positive_rate = y_pred.mean() * 100
-    print(f"Total Samples: {total:,}")
-    print(f"Actual No-Show Rate: {actual_positive_rate:.1f}%")
-    print(f"Predicted No-Show Rate: {predicted_positive_rate:.1f}%")
-
-    print("\nClassification Report:\n")
-    print(classification_report(y_true, y_pred, target_names=['Show', 'No Show']))
-
-# ==============================================
-# 🚀 Evaluation Pipeline
-# ==============================================
-def evaluate_model():
-    print("\n🚀 Loading model and data...")
-    model, threshold, model_name, X, y = load_model_and_data()
-
-    print("\n🔮 Generating predictions...")
-    y_prob = model.predict_proba(X)[:, 1]
-    y_pred = (y_prob >= threshold).astype(int)
-
-    print(f"\n⚙️ Using decision threshold: {threshold:.3f}")
-
-    print_detailed_report(y, y_pred, y_prob, model_name)
-
-    print("\n📊 Generating visualizations...")
-    plot_roc_curve(y, y_prob, model_name)
-    plot_pr_curve(y, y_prob, model_name)
-
-    print("\n✅ Evaluation complete. Results saved in 'reports/plots/'")
-
-# ==============================================
-# 🏁 Entry point
-# ==============================================
-if __name__ == "__main__":
-    evaluate_model()
+print("\n✅ Evaluation complete. Metrics and plots saved.")
