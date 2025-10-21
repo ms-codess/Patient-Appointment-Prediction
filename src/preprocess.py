@@ -1,95 +1,143 @@
-# src/preprocess.py
-import os
-from pathlib import Path
-from dotenv import load_dotenv
+#Preprocessing
+
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import train_test_split
+from pathlib import Path
+from imblearn.over_sampling import SMOTE
 
-# --- Load environment variables ---
-load_dotenv()
-RAW_DATA_PATH = Path(os.getenv("RAW_DATA_PATH"))
-PROCESSED_DATA_PATH = Path(os.getenv("PROCESSED_DATA_PATH"))
+# -------------------------------
+# 1. Load and Parse Dates
+# -------------------------------
+df = pd.read_csv("/content/MedicalCentre.csv") #Change with your path to the dataset
+for col in ["ScheduledDay", "AppointmentDay"]:
+    df[col] = pd.to_datetime(df[col], errors='coerce', utc=True).dt.tz_localize(None)
 
-# --- Load raw data ---
-def load_data():
-    if not RAW_DATA_PATH.exists():
-        raise FileNotFoundError(f"Raw data file not found at {RAW_DATA_PATH}")
-    return pd.read_csv(RAW_DATA_PATH)
+# -------------------------------
+# 2. Basic Cleaning
+# -------------------------------
+df = df.drop_duplicates()
+df = df[df["Age"] >= 0]
+df.loc[df["Age"] > 115, "Age"] = 115
+df["Age"] = df["Age"].fillna(df["Age"].median())
 
-# --- Clean & Feature Engineer ---
-def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    # Drop ID columns if present
-    df.drop(columns=["PatientID", "AppointmentID"], inplace=True, errors="ignore")
+cat_cols = ["Gender", "Neighbourhood", "Scholarship", "Hypertension",
+            "Diabetes", "Alcoholism", "Handicap", "SMS_received"]
+df[cat_cols] = df[cat_cols].fillna("Unknown")
 
-    # Fill Age missing values early
-    if "Age" in df.columns and df["Age"].isnull().any():
-        df["Age"].fillna(df["Age"].median(), inplace=True)
+# -------------------------------
+# 3. Feature Engineering
+# -------------------------------
+df["AwaitingTime"] = (df["AppointmentDay"] - df["ScheduledDay"]).dt.days.clip(lower=0)
 
-    # Remove duplicates
-    df.drop_duplicates(inplace=True)
+# Awaiting Time Groups
+await_bins = [0, 1, 8, 31, 91, 180]
+await_labels = [1, 2, 3, 4, 5]
+df["AwaitingTimeGroup"] = pd.cut(df["AwaitingTime"], bins=await_bins, labels=await_labels, right=False)
 
-    # Remove negative ages
-    if "Age" in df.columns:
-        df = df[df["Age"] >= 0]
+# Age Groups
+age_bins = [0, 2, 6, 11, 16, 26, 31, 36, 41, 51, 115]
+age_labels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+df["AgeGroup"] = pd.cut(df["Age"], bins=age_bins, labels=age_labels, right=False)
 
-    # --- AgeGroup ---
-    if "Age" in df.columns:
-        age_bins = [0, 2, 6, 11, 16, 26, 31, 36, 41, 51, 115]
-        age_labels = list(range(1, len(age_bins)))
-        df["AgeGroup"] = pd.cut(df["Age"], bins=age_bins, labels=age_labels, right=False)
+# Calendar Features
+for col, prefix in [("AppointmentDay", "Appo"), ("ScheduledDay", "Sche")]:
+    dt = df[col]
+    df[f"{prefix}_Year"] = dt.dt.year
+    df[f"{prefix}_Month"] = dt.dt.month
+    df[f"{prefix}_Day"] = dt.dt.day
+    df[f"{prefix}_DOW"] = dt.dt.dayofweek
+    df[f"{prefix}_Weekend"] = (dt.dt.dayofweek >= 5).astype(int)
 
-    # --- Dates ---
-    df["AppointmentDay"] = pd.to_datetime(df["AppointmentDay"])
-    df["ScheduledDay"] = pd.to_datetime(df["ScheduledDay"])
-    df["AwaitingTime"] = (df["AppointmentDay"] - df["ScheduledDay"]).dt.days.abs()
+# -------------------------------
+# 4. Encode Categorical
+# -------------------------------
+# Neighbourhood frequency encoding
+freq = df["Neighbourhood"].value_counts(normalize=True)
+df["Neighbourhood_freq"] = df["Neighbourhood"].map(freq).fillna(0)
+df.drop(columns=["Neighbourhood"], inplace=True, errors="ignore")
 
-    # AwaitingTimeGroup
-    awaiting_bins = [0, 1, 8, 31, 91, 180]
-    awaiting_labels = list(range(1, len(awaiting_bins)))
-    df["AwaitingTimeGroup"] = pd.cut(df["AwaitingTime"], bins=awaiting_bins, labels=awaiting_labels, right=False)
+# Binary encoding
+df["Gender"] = df["Gender"].map({"M": 1, "F": 0}).fillna(0).astype(int)
+binary_cols = ["Scholarship", "Hypertension", "Diabetes", "Alcoholism", "Handicap", "SMS_received"]
+for col in binary_cols:
+    df[col] = df[col].map({1: 1, 0: 0, "Yes": 1, "No": 0}).fillna(0).astype(int)
 
-    # Extract date components
-    for col in ["AppointmentDay", "ScheduledDay"]:
-        prefix = col[:4]
-        df[f"{prefix}_Year"] = df[col].dt.year
-        df[f"{prefix}_Month"] = df[col].dt.month
-        df[f"{prefix}_Day"] = df[col].dt.day
+# -------------------------------
+# 5. Target
+# -------------------------------
+df["No_show_label"] = df["No-show"].map({"Yes": 1, "No": 0})
+df.drop(columns=["No-show", "ScheduledDay", "AppointmentDay"], inplace=True)
 
-    df.drop(columns=["AppointmentDay", "ScheduledDay"], inplace=True)
+# -------------------------------
+# 6. Train / Validation / Test Split
+# -------------------------------
+X = df.drop(columns=["No_show_label"])
+y = df["No_show_label"]
 
-    # Encode categorical variables
-    if "Gender" in df.columns:
-        df["Gender"] = df["Gender"].astype("category").cat.codes
-    if "No-show" in df.columns:
-        df["No-show"] = df["No-show"].astype("category").cat.codes
-    if "Neighbourhood" in df.columns:
-        df["Neighbourhood"] = df["Neighbourhood"].astype("category").cat.codes
+X_train, X_temp, y_train, y_temp = train_test_split(
+    X, y, test_size=0.30, stratify=y, random_state=42
+)
+X_val, X_test, y_val, y_test = train_test_split(
+    X_temp, y_temp, test_size=0.50, stratify=y_temp, random_state=42
+)
 
-    # Drop raw Age and AwaitingTime after creating groups
-    df.drop(columns=["Age", "AwaitingTime"], inplace=True, errors="ignore")
+print(f"✅ Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
 
-    # --- Handle any remaining missing values globally ---
-    for col in df.columns:
-        if df[col].dtype.kind in 'biufc':  # numeric columns
-            median_val = df[col].median()
-            df[col].fillna(median_val, inplace=True)
+# -------------------------------
+# 7. 🧼 Impute Missing Before SMOTE
+# -------------------------------
+num_cols = X_train.select_dtypes(include=[np.number]).columns
+cat_cols = X_train.select_dtypes(exclude=[np.number]).columns
+
+for col in num_cols:
+    median_val = X_train[col].median()
+    X_train[col] = X_train[col].fillna(median_val)
+    X_val[col] = X_val[col].fillna(median_val)
+    X_test[col] = X_test[col].fillna(median_val)
+
+for col in cat_cols:
+    mode_val = X_train[col].mode()[0]
+    X_train[col] = X_train[col].fillna(mode_val)
+    X_val[col] = X_val[col].fillna(mode_val)
+    X_test[col] = X_test[col].fillna(mode_val)
+
+print("\n✅ NaNs before SMOTE (should be 0):")
+print(X_train.isnull().sum()[X_train.isnull().sum() > 0])
+
+# -------------------------------
+# 8. SMOTE on Clean Training Data
+# -------------------------------
+print("\n⚖️ Applying SMOTE...")
+smote = SMOTE(random_state=42)
+X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+
+print("Before SMOTE:", X_train.shape)
+print("After SMOTE:", X_train_res.shape)
+
+# -------------------------------
+# 9. Sanity Check for NaNs after SMOTE
+# -------------------------------
+if X_train_res.isnull().sum().sum() > 0:
+    print("\n⚠️ Found NaNs after SMOTE, imputing...")
+    for col in X_train_res.columns:
+        if X_train_res[col].dtype.kind in "biufc":
+            X_train_res[col] = X_train_res[col].fillna(X_train_res[col].median())
         else:
-            if df[col].mode().shape[0] > 0:
-                df[col].fillna(df[col].mode()[0], inplace=True)
+            X_train_res[col] = X_train_res[col].fillna(X_train_res[col].mode()[0])
 
-    return df
+print("\n✅ NaNs after SMOTE (should be 0):")
+print(X_train_res.isnull().sum()[X_train_res.isnull().sum() > 0])
 
-# --- Save processed data ---
-def save_data(df: pd.DataFrame):
-    PROCESSED_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(PROCESSED_DATA_PATH, index=False)
+# -------------------------------
+# 10. Save Processed Files
+# -------------------------------
+processed_dir = Path("data/processed")
+processed_dir.mkdir(parents=True, exist_ok=True)
 
-# --- Pipeline ---
-def preprocess_pipeline():
-    df = load_data()
-    df = clean_data(df)
-    save_data(df)
-    return df
+pd.concat([X_train_res, y_train_res.rename("No_show_label")], axis=1).to_csv(processed_dir / "train_processed_smote.csv", index=False)
+pd.concat([X_val, y_val.rename("No_show_label")], axis=1).to_csv(processed_dir / "val_processed.csv", index=False)
+pd.concat([X_test, y_test.rename("No_show_label")], axis=1).to_csv(processed_dir / "test_processed.csv", index=False)
 
-if __name__ == "__main__":
-    preprocess_pipeline()
+print("\n✅ Preprocessing completed successfully. Clean files saved in data/processed/")
+
