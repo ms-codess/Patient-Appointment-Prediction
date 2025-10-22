@@ -1,44 +1,81 @@
-**Patient Appointment No-Show Prediction**
-Project Overview
-This project aims to predict patient no-shows for medical appointments using machine learning. We've chosen LightGBM with Optuna optimization due to its efficiency with tabular data and ability to handle class imbalance.
+# 🩺 Patient Appointment No-Show Prediction
 
-**Dataset**
-The dataset is from the Medical Appointment No Shows Dataset on Kaggle, containing 110,527 medical appointments and 14 associated variables.
+This project develops a machine learning pipeline to **predict patient no-shows** for medical appointments.  
+The objective is to support healthcare providers in **reducing missed appointments**, improving scheduling efficiency, and optimizing resource allocation.
 
-**Key Features**
-Patient demographics (Age, Gender)
-Medical history (Hypertension, Diabetes, Alcoholism, Handicap)
-Appointment context (SMS_received, ScheduledDay, AppointmentDay)
-Social factors (Scholarship, Neighbourhood)
-Model Selection Rationale
-Why LightGBM?
-Performance
+> 📊 **Dataset Source**: [Medical Appointment No Shows — Kaggle](https://www.kaggle.com/datasets/joniarroba/noshowappointments)
 
-**Efficient handling of large datasets**
-Built-in support for categorical features
-Leaf-wise tree growth for better accuracy
-Class Imbalance Handling
+---
 
-**Native support for imbalanced datasets**
-Scale_pos_weight parameter for class weighting
-Compatible with SMOTE preprocessing
-Interpretability
+## 📁 Dataset Overview
 
-Feature importance rankings
-Tree visualization capabilities
-SHAP value integration
-Why Optuna?
-Hyperparameter Optimization
-Efficient Bayesian optimization
-Pruning of unpromising trials
-Parallel optimization support
-## Current Performance Metrics
-F1 Score: 0.4632
-Precision: 0.3482
-Recall: 0.6918
-ROC AUC: 0.7560
+The dataset contains **110,527 appointment records** and **14 variables** describing patient demographics, medical history, appointment context, and social factors.
 
-## Project Structure
+### Feature Categories
+
+- **Patient Demographics**: `Age`, `Gender`  
+- **Medical History**: `Hypertension`, `Diabetes`, `Alcoholism`, `Handicap`  
+- **Appointment Context**: `ScheduledDay`, `AppointmentDay`, `SMS_received`  
+- **Social Factors**: `Scholarship`, `Neighbourhood`  
+- **Target Variable**: `No-show` (Yes/No)
+
+---
+
+## 🧠 Model Selection Rationale
+
+### Why [LightGBM](https://lightgbm.readthedocs.io/)?
+
+LightGBM was chosen for its **high performance on structured/tabular data** and its ability to efficiently handle **imbalanced classification problems**.
+
+#### ⚡ Performance
+- Fast and memory-efficient gradient boosting
+- Native categorical feature handling
+- Leaf-wise tree growth strategy → improved accuracy over depth-wise growth
+
+#### ⚖️ Class Imbalance Handling
+- Built-in `scale_pos_weight` parameter for weighting minority class
+- Fully compatible with SMOTE preprocessing
+- Supports early stopping and regularization
+
+#### 🧭 Interpretability
+- Feature importance ranking for explainability
+- Tree visualization capabilities
+- SHAP integration for model interpretability
+
+---
+
+## 🔍 Hyperparameter Optimization with [Optuna](https://optuna.org/)
+
+Optuna was used for **Bayesian hyperparameter optimization**, enabling:
+
+- **Efficient search** of hyperparameter space  
+- **Early pruning** of unpromising trials  
+- **Parallel execution** for faster optimization
+
+### Optimization Space Example
+
+```python
+{
+    'lambda_l1': [1e-8, 10.0],
+    'lambda_l2': [1e-8, 10.0],
+    'num_leaves': [2, 256],
+    'feature_fraction': [0.4, 1.0],
+    'bagging_fraction': [0.4, 1.0],
+    'bagging_freq': [1, 7],
+    'min_child_samples': [5, 100],
+    'learning_rate': [0.01, 0.1]
+}
+```
+
+- 🧪 **Optimization Metric:** F1 Score  
+- 🔁 **Trials per run:** 50  
+- ⏳ **Iterations:** Multiple runs with different seeds to improve stability and avoid overfitting
+
+
+---
+
+## 🧪 Project Structure
+
 ```
 Patient-Appointment-Prediction/
 │
@@ -61,67 +98,68 @@ Patient-Appointment-Prediction/
     └── evaluate.py
 ```
 
-## Pipeline Components
+---
 
-### 1. Data Preprocessing (`preprocess.py`)
-- Date parsing and feature engineering
-- Train/validation/test split
-- SMOTE for handling class imbalance
-- Standard scaling for numerical features
-- Target encoding for categorical variables
+## 🧭 ML Pipeline Components
+
+### 1. Preprocessing (`preprocess.py`)
+- Parse dates and create temporal features
+- Feature engineering (`lead_time`, `weekday`, `is_weekend`)
+- Handle class imbalance with SMOTE
+- Train/validation/test splitting
+- Scaling numerical features and encoding categorical variables
 
 ### 2. Model Training (`train.py`)
-- Framework: LightGBM with Optuna optimization
-- Hyperparameter tuning:
-  ```python
-  {
-      'lambda_l1': [1e-8, 10.0],
-      'lambda_l2': [1e-8, 10.0],
-      'num_leaves': [2, 256],
-      'feature_fraction': [0.4, 1.0],
-      'bagging_fraction': [0.4, 1.0],
-      'bagging_freq': [1, 7],
-      'min_child_samples': [5, 100],
-      'learning_rate': [0.01, 0.1]
-  }
-  ```
-- 50 optimization trials per run
-- Optimization metric: F1 Score
+- LightGBM model with Optuna optimization
+- Cross-validation for robust scoring
+- Model persisted as `.pkl`
 
-### 3. Model Evaluation (`evaluate.py`)
-- Metrics:
-  - F1 Score
-  - Precision
-  - Recall
-  - ROC AUC
-- Confusion matrix analysis
-- Performance logging
+### 3. Evaluation (`evaluate.py`)
+- Metrics: F1, Precision, Recall, ROC AUC
+- Confusion matrix visualization
+- SHAP feature importance plots
+- Experiment logs saved to `results/metrics.csv`
 
-## Setup and Usage
+---
 
-### Requirements
+## ⚙️ Setup & Usage
+
+### Install Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Running the Pipeline
-1. Preprocessing:
+### Run the Pipeline
+
 ```bash
+# Preprocess data
 python src/preprocess.py
-```
 
-2. Training:
-```bash
+# Train model
 python src/train.py
-```
 
-3. Evaluation:
-```bash
+# Evaluate results
 python src/evaluate.py
 ```
 
-## Current Limitations
-- Model performance needs improvement
-- Class imbalance affecting predictions
-- Limited feature engineering
+---
 
+## 🚧 Current Limitations & Next Steps
+
+- **Class Imbalance:** Recall can be further improved using advanced sampling or focal loss  
+- **Feature Engineering:** Temporal and behavioral variables can be extended  
+- **Model Generalization:** Consider model calibration and ensembling
+
+### Planned Enhancements
+- Evaluate [CatBoost](https://catboost.ai/) and [XGBoost](https://xgboost.readthedocs.io/)  
+- Introduce cost-sensitive evaluation  
+- Deploy real-time prediction API
+
+---
+
+## 🏷️ References
+
+- [Kaggle Dataset: Medical Appointment No Shows](https://www.kaggle.com/datasets/joniarroba/noshowappointments)  
+- [LightGBM Documentation](https://lightgbm.readthedocs.io/)  
+- [Optuna Documentation](https://optuna.org/)
