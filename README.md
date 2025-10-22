@@ -1,117 +1,127 @@
-🏥 Patient Appointment No-Show Prediction
+**Patient Appointment No-Show Prediction**
+Project Overview
+This project aims to predict patient no-shows for medical appointments using machine learning. We've chosen LightGBM with Optuna optimization due to its efficiency with tabular data and ability to handle class imbalance.
 
-> An interactive **Streamlit dashboard** that predicts patient no-shows for medical appointments using machine learning and **SHAP explainability**.  
-> Built with an end-to-end pipeline: preprocessing → training → evaluation → interactive app.
+**Dataset**
+The dataset is from the Medical Appointment No Shows Dataset on Kaggle, containing 110,527 medical appointments and 14 associated variables.
 
----
+**Key Features**
+Patient demographics (Age, Gender)
+Medical history (Hypertension, Diabetes, Alcoholism, Handicap)
+Appointment context (SMS_received, ScheduledDay, AppointmentDay)
+Social factors (Scholarship, Neighbourhood)
+Model Selection Rationale
+Why LightGBM?
+Performance
 
-## 🚀 Features
+**Efficient handling of large datasets**
+Built-in support for categorical features
+Leaf-wise tree growth for better accuracy
+Class Imbalance Handling
 
-- 🤖 **ML-powered predictions** — Predict whether a patient is likely to miss their appointment.  
-- 📊 **End-to-end pipeline** — Clean data, train models, evaluate, and deploy.  
-- 🧠 **Explainability with SHAP** — Understand which factors drive the model’s predictions.  
-- 🧭 **Interactive UI** — User-friendly input for non-technical users.  
-- 📈 **Model metrics dashboard** — Real-time accuracy, precision, recall, and confusion matrix.
+**Native support for imbalanced datasets**
+Scale_pos_weight parameter for class weighting
+Compatible with SMOTE preprocessing
+Interpretability
 
----
+Feature importance rankings
+Tree visualization capabilities
+SHAP value integration
+Why Optuna?
+Hyperparameter Optimization
+Efficient Bayesian optimization
+Pruning of unpromising trials
+Parallel optimization support
+## Current Performance Metrics
+F1 Score: 0.4632
+Precision: 0.3482
+Recall: 0.6918
+ROC AUC: 0.7560
 
-## 🧰 Tech Stack & Libraries
-
-| Category                | Tools & Libraries                                                |
-|--------------------------|------------------------------------------------------------------|
-| 💻 Frontend (App)        | [Streamlit](https://streamlit.io/)                               |
-| 🧠 ML / Modeling         | [XGBoost](https://xgboost.ai/), [scikit-learn](https://scikit-learn.org/) |
-| 🧼 Preprocessing         | [Pandas](https://pandas.pydata.org/), [NumPy](https://numpy.org/) |
-| 📊 Visualization         | [Matplotlib](https://matplotlib.org/), [Seaborn](https://seaborn.pydata.org/) |
-| 🧠 Explainability        | [SHAP](https://shap.readthedocs.io/)                              |
-| 🧾 Model Management      | [joblib](https://joblib.readthedocs.io/)                          |
-
----
-📊 Dataset
-
-This project uses the No-show Medical Appointments
- dataset from [Kaggle](https://www.kaggle.com/datasets/joniarroba/noshowappointments) which contains 110,527 appointment records collected from public hospitals in Brazil.
-
-🏥 Key Features:
-
-Gender — Patient gender
-
-Age — Patient age
-
-ScheduledDay / AppointmentDay — When the appointment was booked and when it occurs
-
-Neighbourhood — Location of the hospital
-
-MedicalCoverage (originally Scholarship) — Indicates if the patient receives government health coverage
-
-Hypertension, Diabetes, Alcoholism, Handcap — Health conditions
-
-SMS_received — Whether the patient received a reminder SMS
-
-No-show (Target) — Indicates if the patient attended (No) or missed (Yes) the appointment.
-## 📂 Project Structure
-
+## Project Structure
+```
+Patient-Appointment-Prediction/
+│
+├── data/
+│   ├── processed/
+│   │   ├── train_processed_smote.csv
+│   │   ├── val_processed.csv
+│   │   └── test_processed.csv
+│   └── MedicalCentre.csv
+│
+├── models/
+│   └── lightgbm_optimized.pkl
+│
+├── results/
+│   └── metrics.csv
+│
+└── src/
+    ├── preprocess.py
+    ├── train.py
+    └── evaluate.py
 ```
 
-📦 Patient-Appointment-Prediction
-├── 📁 src
-│   ├── preprocess.py          # Data cleaning & feature engineering
-│   ├── train.py               # Model training
-│   ├── evaluate.py            # Evaluation & metrics
-│   └── app_streamlit.py       # Streamlit UI
-├── 📁 data
-│   ├── raw/
-│   └── processed/
-├── 📁 models
-│   └── best_model.joblib
-├── 📁 notebooks               # Exploratory analysis
-├── requirements.txt
-├── README.md
-└── .gitignore
+## Pipeline Components
 
-````
+### 1. Data Preprocessing (`preprocess.py`)
+- Date parsing and feature engineering
+- Train/validation/test split
+- SMOTE for handling class imbalance
+- Standard scaling for numerical features
+- Target encoding for categorical variables
 
----
+### 2. Model Training (`train.py`)
+- Framework: LightGBM with Optuna optimization
+- Hyperparameter tuning:
+  ```python
+  {
+      'lambda_l1': [1e-8, 10.0],
+      'lambda_l2': [1e-8, 10.0],
+      'num_leaves': [2, 256],
+      'feature_fraction': [0.4, 1.0],
+      'bagging_fraction': [0.4, 1.0],
+      'bagging_freq': [1, 7],
+      'min_child_samples': [5, 100],
+      'learning_rate': [0.01, 0.1]
+  }
+  ```
+- 50 optimization trials per run
+- Optimization metric: F1 Score
 
-## 🧪 How to Run Locally
+### 3. Model Evaluation (`evaluate.py`)
+- Metrics:
+  - F1 Score
+  - Precision
+  - Recall
+  - ROC AUC
+- Confusion matrix analysis
+- Performance logging
 
-### 1️⃣ Clone the Repository
-```bash
-git clone https://github.com/ms-codess/Patient-Appointment-Prediction.git
-cd Patient-Appointment-Prediction
-````
+## Setup and Usage
 
-### 2️⃣ Create Virtual Environment
-
-```bash
-python -m venv venv
-source venv/bin/activate     # (Linux/Mac)
-venv\Scripts\activate        # (Windows)
-```
-
-### 3️⃣ Install Dependencies
-
+### Requirements
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4️⃣ Run the Streamlit App
-
+### Running the Pipeline
+1. Preprocessing:
 ```bash
-streamlit run src/app_streamlit.py
+python src/preprocess.py
 ```
 
-👉 Open your browser at [http://localhost:8501](http://localhost:8501)
+2. Training:
+```bash
+python src/train.py
+```
 
----
+3. Evaluation:
+```bash
+python src/evaluate.py
+```
 
-## 🧠 Model Explainability Example
-
-| Feature                 | SHAP Impact                    |
-| ----------------------- | ------------------------------ |
-| Waiting Time (31+ days) | 🔺 Increases no-show risk      |
-| Age Group (Senior)      | 🟩 Decreases no-show risk      |
-| SMS Reminder            | 🟩 Reduces missed appointments |
-
-🧭 The dashboard uses **SHAP summary plots** to make model decisions transparent.
+## Current Limitations
+- Model performance needs improvement
+- Class imbalance affecting predictions
+- Limited feature engineering
 

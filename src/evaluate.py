@@ -24,8 +24,9 @@ from sklearn.metrics import (
 # -------------------------------
 # 1. Paths
 # -------------------------------
-MODEL_DIR = Path("models")
-TEST_PATH = Path("data/processed/test_processed.csv")
+base_dir = Path(r"C:\Users\msmirani\Downloads\Patient-Appointment-Prediction\src")
+MODEL_DIR = base_dir / "models"
+TEST_PATH = base_dir / "data" / "processed" / "test_processed.csv"
 MODEL_PATH = list(MODEL_DIR.glob("*_model_f1.pkl"))[0]  # auto-pick saved model with f1 optimization
 THRESHOLD_PATH = MODEL_DIR / "best_threshold_f1.txt" # Use the F1 optimized threshold
 
