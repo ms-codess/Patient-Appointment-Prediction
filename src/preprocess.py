@@ -1,17 +1,25 @@
-#Preprocessing
+"""Preprocessing pipeline for Patient Appointment No-Show dataset.
 
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
+Reads raw CSV, engineers features, splits into train/val/test,
+applies SMOTE to the training split, and saves processed CSVs under
+`data/processed/` relative to the project root.
+"""
+
 from pathlib import Path
-from imblearn.over_sampling import SMOTE
-from sklearn.preprocessing import StandardScaler
+
+import numpy as np
+import pandas as pd
 from category_encoders import TargetEncoder
+from imblearn.over_sampling import SMOTE
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
 
 # -------------------------------
 # 1. Load and Parse Dates
 # -------------------------------
-data_path = r"c:\Users\msmirani\Downloads\Patient-Appointment-Prediction\MedicalCentre.csv"
+ROOT = Path(__file__).resolve().parents[1]
+data_path = ROOT / "MedicalCentre.csv"
 print(f"Loading data from: {data_path}")
 df = pd.read_csv(data_path)
 
@@ -22,7 +30,9 @@ df["AppointmentDay"] = pd.to_datetime(df["AppointmentDay"])
 
 # Calculate waiting time
 print("Calculating waiting time...")
-df["AwaitingTime"] = (df["AppointmentDay"] - df["ScheduledDay"]).dt.total_seconds() / (24 * 60 * 60)
+df["AwaitingTime"] = (
+    df["AppointmentDay"] - df["ScheduledDay"]
+).dt.total_seconds() / (24 * 60 * 60)
 
 # Print column names to verify
 print("\nAvailable columns:")
@@ -37,8 +47,16 @@ df = df[df["Age"] >= 0]
 df.loc[df["Age"] > 115, "Age"] = 115
 df["Age"] = df["Age"].fillna(df["Age"].median())
 
-cat_cols = ["Gender", "Neighbourhood", "Scholarship", "Hypertension",
-            "Diabetes", "Alcoholism", "Handicap", "SMS_received"]
+cat_cols = [
+    "Gender",
+    "Neighbourhood",
+    "Scholarship",
+    "Hypertension",
+    "Diabetes",
+    "Alcoholism",
+    "Handicap",
+    "SMS_received",
+]
 df[cat_cols] = df[cat_cols].fillna("Unknown")
 
 # -------------------------------
@@ -91,9 +109,16 @@ df.drop(columns=["Neighbourhood"], inplace=True, errors="ignore")
 
 # Binary encoding
 df["Gender"] = df["Gender"].map({"M": 1, "F": 0, "Unknown": 0.5}).astype(float)
-binary_cols = ["Scholarship", "Hypertension", "Diabetes", "Alcoholism", "Handicap", "SMS_received"]
+binary_cols = [
+    "Scholarship",
+    "Hypertension",
+    "Diabetes",
+    "Alcoholism",
+    "Handicap",
+    "SMS_received",
+]
 for col in binary_cols:
-    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
 # -------------------------------
 # 6. Target
@@ -116,7 +141,7 @@ X_val, X_test, y_val, y_test = train_test_split(
     X_temp, y_temp, test_size=0.50, stratify=y_temp, random_state=42
 )
 
-print(f"\n✅ Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
+print(f"\nSplits -> Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
 
 # -------------------------------
 # 8. Final Data Check and SMOTE
@@ -132,12 +157,14 @@ print(f"After SMOTE: {X_train_res.shape}")
 # 9. Save Processed Files
 # -------------------------------
 print("\nSaving processed files...")
-processed_dir = Path(r"c:\Users\msmirani\Downloads\Patient-Appointment-Prediction\data\processed")
+processed_dir = ROOT / "data" / "processed"
 processed_dir.mkdir(parents=True, exist_ok=True)
 
-pd.concat([X_train_res, y_train_res], axis=1).to_csv(processed_dir / "train_processed_smote.csv", index=False)
+pd.concat([X_train_res, y_train_res], axis=1).to_csv(
+    processed_dir / "train_processed_smote.csv", index=False
+)
 pd.concat([X_val, y_val], axis=1).to_csv(processed_dir / "val_processed.csv", index=False)
 pd.concat([X_test, y_test], axis=1).to_csv(processed_dir / "test_processed.csv", index=False)
 
-print("\n✅ Preprocessing completed successfully. Files saved in:", processed_dir)
+print("\nPreprocessing completed successfully. Files saved in:", processed_dir)
 

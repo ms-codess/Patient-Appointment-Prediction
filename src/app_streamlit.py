@@ -7,7 +7,17 @@ import joblib
 import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import (
+    confusion_matrix,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    average_precision_score,
+    roc_curve,
+    precision_recall_curve,
+)
 
 
 # =========================================================
@@ -157,16 +167,14 @@ if not target_col:
 expected_features = [c for c in feature_cols if c != TARGET_COL]
 background_X = data.reindex(columns=expected_features, fill_value=0)
 
-# Load the best threshold with a safe fallback
+# Load the best threshold with a safe fallback, silently
 best_threshold = 0.50
 if THRESHOLD_PATH.exists():
     try:
         with open(THRESHOLD_PATH, "r") as f:
             best_threshold = float(f.read().strip())
-    except Exception as e:
-        st.warning(f"Could not parse threshold at {THRESHOLD_PATH}: {e}. Using default 0.50.")
-else:
-    st.info(f"Threshold file not found at {THRESHOLD_PATH}. Using default 0.50.")
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -192,12 +200,10 @@ with st.sidebar:
         st.info("No feature columns available for preview.")
 
     st.markdown("---")
-    st.header("Model Info")
+    st.header("Model Controls")
     st.write(f"Model Type: {type(model).__name__}")
-    st.write(f"Operating Threshold (default): {best_threshold:.3f}")
     st.write(f"Model File: {MODEL_PATH.name}")
-
-    threshold = st.slider("Operating Threshold", min_value=0.0, max_value=1.0, value=float(best_threshold), step=0.01)
+    threshold = st.slider("Operating Threshold", min_value=0.0, max_value=1.0, value=float(best_threshold), step=0.01, help="Adjust to explore precision/recall trade-off.")
 
 
 # =========================================================
@@ -371,10 +377,27 @@ with tab_performance:
                     y_prob = model.predict_proba(X_test)[:, 1]
                     y_pred = (y_prob >= float(threshold)).astype(int)
 
-                    st.text("Classification Report (using selected threshold):")
+                    # KPI cards
+                    acc = float((y_pred == y_test).mean())
+                    prec = precision_score(y_test, y_pred, zero_division=0)
+                    rec = recall_score(y_test, y_pred, zero_division=0)
+                    f1 = f1_score(y_test, y_pred, zero_division=0)
+                    roc = roc_auc_score(y_test, y_prob)
+                    pr_auc = average_precision_score(y_test, y_prob)
+
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("Accuracy", f"{acc:.1%}")
+                    k2.metric("F1 Score", f"{f1:.3f}")
+                    k3.metric("Precision", f"{prec:.3f}")
+                    k4.metric("Recall", f"{rec:.3f}")
+                    st.caption(f"ROC AUC: {roc:.3f}  •  PR AUC: {pr_auc:.3f}")
+
+                    # Classification report
+                    st.markdown("#### Classification Report")
                     st.code(classification_report(y_test, y_pred, target_names=["Show", "No-Show"]))
 
-                    st.text("Confusion Matrix:")
+                    # Confusion matrix
+                    st.markdown("#### Confusion Matrix")
                     cm = confusion_matrix(y_test, y_pred)
                     fig, ax = plt.subplots()
                     sns.heatmap(
@@ -385,6 +408,50 @@ with tab_performance:
                     ax.set_xlabel("Predicted Label")
                     ax.set_ylabel("Actual Label")
                     st.pyplot(fig)
+
+                    # Curves
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("#### ROC Curve")
+                        fpr, tpr, _ = roc_curve(y_test, y_prob)
+                        fig2, ax2 = plt.subplots()
+                        ax2.plot(fpr, tpr, label=f"ROC AUC = {roc:.3f}")
+                        ax2.plot([0, 1], [0, 1], "k--")
+                        ax2.set_xlabel("False Positive Rate")
+                        ax2.set_ylabel("True Positive Rate")
+                        ax2.legend()
+                        st.pyplot(fig2)
+                    with c2:
+                        st.markdown("#### Precision-Recall Curve")
+                        pr, rc, _ = precision_recall_curve(y_test, y_prob)
+                        fig3, ax3 = plt.subplots()
+                        ax3.plot(rc, pr, label=f"PR AUC = {pr_auc:.3f}")
+                        ax3.set_xlabel("Recall")
+                        ax3.set_ylabel("Precision")
+                        ax3.legend()
+                        st.pyplot(fig3)
+
+                    # Score distribution
+                    with st.expander("Score Distribution (Predicted Probabilities)"):
+                        fig4, ax4 = plt.subplots()
+                        sns.histplot(y_prob, bins=30, kde=True, ax=ax4)
+                        ax4.axvline(float(threshold), color='red', linestyle='--', label='Threshold')
+                        ax4.set_xlabel('No-Show Probability')
+                        ax4.legend()
+                        st.pyplot(fig4)
+
+                    # Download predictions
+                    pred_df = pd.DataFrame({
+                        'y_true': y_test.values,
+                        'y_prob': y_prob,
+                        'y_pred': y_pred,
+                    })
+                    st.download_button(
+                        label="Download Predictions (CSV)",
+                        data=pred_df.to_csv(index=False).encode('utf-8'),
+                        file_name='predictions_test.csv',
+                        mime='text/csv'
+                    )
                 else:
                     st.warning("Test data loaded but appears empty or missing target column after processing.")
 
@@ -407,5 +474,3 @@ with tab_about:
     )
     st.markdown("---")
     st.markdown("Built with Streamlit; see preprocessing/training scripts in the repo.")
-
-
