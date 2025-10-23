@@ -1,9 +1,59 @@
-# 🩺 Patient Appointment No-Show Prediction
+# 🏥 Patient Appointment No-Show Prediction
 
-This project develops a machine learning pipeline to **predict patient no-shows** for medical appointments.  
-The objective is to support healthcare providers in **reducing missed appointments**, improving scheduling efficiency, and optimizing resource allocation.
+This project develops a **machine learning pipeline** to predict patient no-shows for medical appointments.  
 
-> 📊 **Dataset Source**: [Medical Appointment No Shows — Kaggle](https://www.kaggle.com/datasets/joniarroba/noshowappointments)
+## Live Preview
+
+👉 [**Launch the Web App**](https://patient-appointment-prediction.streamlit.app/)
+
+This interactive dashboard allows users to:
+- Upload patient appointment data  
+- Run predictions using a trained model  
+- Visualize trends, distributions, and no-show probabilities
+
+---
+
+## 📊 Dataset
+
+> **Source:** [Medical Appointment No Shows — Kaggle](https://www.kaggle.com/datasets/joniarroba/noshowappointments)
+
+The dataset contains **110,527 medical appointments** with **14 variables**, including:
+- Patient demographics (Age, Gender)  
+- Medical history (Hypertension, Diabetes, Alcoholism, Handicap)  
+- Appointment context (SMS_received, ScheduledDay, AppointmentDay)  
+- Social factors (Scholarship, Neighbourhood)
+
+---
+
+## 🧠 Machine Learning Pipeline
+
+1. **Data Preprocessing**
+   - Handling missing values & duplicates  
+   - Feature engineering (time intervals, categorical encoding)  
+   - Balancing class distribution with SMOTE
+
+2. **Modeling**
+   - **LightGBM** selected for its strong performance on tabular data  
+   - Hyperparameter tuning using **Optuna**  
+   - Evaluation with metrics like accuracy, precision, recall, F1-score, and AUC
+
+3. **Interpretability**
+   - Feature importance plots  
+   - SHAP values for explainable predictions
+
+---
+
+## 📈 Dashboard Preview
+
+Below are screenshots from the deployed Streamlit dashboard:
+
+<p align="center">
+  <img src="assets/Dashboard-patientprediction.png" alt="Dashboard Preview 1" width="700"/>
+</p>
+
+<p align="center">
+  <img src="assets/Dashboard-patientprediction2.png" alt="Dashboard Preview 2" width="700"/>
+</p>
 
 ---
 
