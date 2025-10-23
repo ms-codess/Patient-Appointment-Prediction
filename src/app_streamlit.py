@@ -218,35 +218,93 @@ tab_predict, tab_explain, tab_performance, tab_about = st.tabs(
 # TAB: PREDICTION
 # =========================================================
 with tab_predict:
-    st.subheader("Enter/Select Patient Information")
+    st.subheader("Make a Prediction")
 
     if "prediction" not in st.session_state:
         st.session_state.prediction = None
     if "user_input_df" not in st.session_state:
         st.session_state.user_input_df = None
 
-    st.write("For schema safety, pick an example row from the processed training data.")
-    col_pick1, col_pick2 = st.columns([2, 1])
-    with col_pick1:
-        index_choice = st.number_input("Row index", min_value=0, max_value=max(0, len(data) - 1), value=0, step=1)
-    with col_pick2:
-        if st.button("Random row"):
-            index_choice = int(np.random.randint(0, len(data)))
+    # Simple, user-friendly inputs
+    day_name_to_int = {
+        "Monday": 0, "Tuesday": 1, "Wednesday": 2,
+        "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6,
+    }
+    gender_to_num = {"Female": 0.0, "Male": 1.0, "Other/Unknown": 0.5}
 
-    # Build input row (features only)
-    X_row = data.drop(columns=[TARGET_COL]).iloc[[int(index_choice)]].reindex(columns=expected_features, fill_value=0)
-    X_row = cast_like_training(X_row, data.drop(columns=[TARGET_COL]))
+    def build_row_from_simple_inputs(df_processed: pd.DataFrame, inputs: dict) -> pd.DataFrame:
+        features_df = df_processed.drop(columns=[TARGET_COL])
+        baseline = features_df.median(numeric_only=True)
+        row = baseline.copy()
+        row["Gender"] = gender_to_num[inputs["gender"]]
+        row["Scholarship"] = int(inputs["scholarship"])
+        row["Hypertension"] = int(inputs["hypertension"])
+        row["Diabetes"] = int(inputs["diabetes"])
+        row["Alcoholism"] = int(inputs["alcoholism"])
+        row["Handicap"] = int(inputs["handicap"])
+        row["SMS_received"] = int(inputs["sms"])
+        row["ScheduledHour"] = int(inputs["scheduled_hour"])
+        row["AppointmentHour"] = int(inputs["appointment_hour"])
+        row["AppointmentDayOfWeek"] = day_name_to_int[inputs["appt_dow"]]
+        row["IsWeekend"] = 1 if row["AppointmentDayOfWeek"] in [5, 6] else 0
+        row["Appointment_Month"] = int(inputs["month"])
+        row["Same_Day_Appointment"] = 1 if inputs["same_day"] else 0
+        row["Multiple_Conditions"] = 1 if (row["Hypertension"] + row["Diabetes"] + row["Alcoholism"] + row["Handicap"]) > 1 else 0
+        row["Age_Scholarship"] = row.get("Age", 0) * row["Scholarship"]
+        row["SMS_AwaitingTime"] = row.get("AwaitingTime", 0) * row["SMS_received"]
+        row = row.reindex(index=expected_features, fill_value=0)
+        return row.to_frame().T
 
-    st.dataframe(X_row, use_container_width=True)
+    with st.form("simple_predict_form", clear_on_submit=False):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            gender = st.selectbox("Gender", list(gender_to_num.keys()), index=0)
+            scholarship = st.checkbox("Scholarship", value=False)
+            sms = st.checkbox("SMS received", value=False)
+        with col2:
+            hypertension = st.checkbox("Hypertension", value=False)
+            diabetes = st.checkbox("Diabetes", value=False)
+            alcoholism = st.checkbox("Alcoholism", value=False)
+        with col3:
+            handicap = st.selectbox("Handicap", [0, 1, 2], index=0)
+            appt_dow = st.selectbox("Appointment Day", list(day_name_to_int.keys()), index=0)
+            month = st.selectbox("Month", list(range(1, 13)), index=0)
 
-    if st.button("Run Prediction", use_container_width=True):
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            scheduled_hour = st.slider("Scheduled Hour", 0, 23, 9)
+        with col5:
+            appointment_hour = st.slider("Appointment Hour", 0, 23, 14)
+        with col6:
+            same_day = st.checkbox("Same-day appointment", value=False)
+
+        submitted = st.form_submit_button("Predict", use_container_width=True)
+
+    if submitted:
+        simple_inputs = {
+            "gender": gender,
+            "scholarship": scholarship,
+            "hypertension": hypertension,
+            "diabetes": diabetes,
+            "alcoholism": alcoholism,
+            "handicap": handicap,
+            "sms": sms,
+            "appt_dow": appt_dow,
+            "month": month,
+            "scheduled_hour": scheduled_hour,
+            "appointment_hour": appointment_hour,
+            "same_day": same_day,
+        }
+
+        X_row = build_row_from_simple_inputs(data, simple_inputs)
+        X_row = cast_like_training(X_row, data.drop(columns=[TARGET_COL]))
+
         try:
             prob = float(model.predict_proba(X_row)[0, 1])
         except Exception:
-            # Some models may not support predict_proba; fall back if needed
             try:
                 prob = float(model.decision_function(X_row))
-                prob = 1.0 / (1.0 + np.exp(-prob))  # sigmoid
+                prob = 1.0 / (1.0 + np.exp(-prob))
             except Exception as e:
                 st.error(f"Model cannot produce probability: {e}")
                 raise st.stop()
@@ -254,7 +312,7 @@ with tab_predict:
         predicted_class = "No-Show" if prob >= float(threshold) else "Will Attend"
         risk_level = (
             ("High", "red") if prob >= float(threshold) + (1 - float(threshold)) * 0.2
-            else ("Medium", "orange") if prob >= float(threshold) - (float(threshold) * 0.2)
+            else ("Medium", "orange") if prob >= float(threshold)
             else ("Low", "green")
         )
 
