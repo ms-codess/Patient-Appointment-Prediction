@@ -18,15 +18,12 @@ The dataset contains 110,527 appointment records and 14 variables describing pat
 
 ## Model Selection Rationale
 
-Why these models fit this problem
+
 Logistic Regression provides a fast, strong baseline for tabular data and works well with engineered features (waiting time, long wait flags, temporal indicators). It is easy to interpret via coefficients, supports regularization to prevent overfitting, produces calibrated probabilities suitable for threshold tuning, and with class_weight balanced it handles skewed classes reasonably. It sets a transparent benchmark for precision and recall.
 
 Random Forest captures non‑linear relationships and feature interactions that are common in behavioral outcomes like no‑shows (for example, long waits interacting with reminder SMS). It is robust to outliers, requires little preprocessing after encoding, offers stable ranking ability (ROC/PR), and with class_weight balanced_subsample it mitigates class imbalance while remaining straightforward to deploy.
 
 LightGBM is a gradient boosting method that consistently performs well on structured/tabular data. It models complex interactions, trains quickly on large datasets, and supports imbalance handling through scale_pos_weight. It is tolerant of missing values and noisy features, and pairs well with target encoding for higher‑cardinality variables like neighborhood. Because our business objective prioritizes recall and F1, we complement LightGBM with validation‑based threshold tuning to align decisions with operational costs.
-
-Why not deep learning here
-This is a classic tabular problem with engineered features and moderate dimensionality. Tree‑based methods and linear baselines typically outperform deep models on such data with less compute, simpler deployment, and better explainability.
 
 
 ## Hyperparameter and Threshold Optimization
