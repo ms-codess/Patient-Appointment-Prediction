@@ -1,534 +1,518 @@
-from pathlib import Path
-
-import streamlit as st
-import pandas as pd
+﻿from pathlib import Path
+import warnings
 import numpy as np
+import pandas as pd
+import streamlit as st
 import joblib
-import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import (
-    confusion_matrix,
-    classification_report,
+    precision_recall_curve,
+    roc_curve,
+    auc,
     f1_score,
     precision_score,
     recall_score,
-    roc_auc_score,
-    average_precision_score,
-    roc_curve,
-    precision_recall_curve,
 )
 
+warnings.filterwarnings("ignore")
 
-# =========================================================
-# PAGE CONFIG
-# =========================================================
-st.set_page_config(page_title="Patient No-Show Prediction", layout="wide")
-st.title("Patient No-Show Risk Prediction Dashboard")
-
-
-# =========================================================
-# PATHS & CONSTANTS
-# =========================================================
+# Paths
 ROOT = Path(__file__).resolve().parents[1]
-TARGET_COL = "No_show_label"
-
-MODEL_DIR = ROOT / "models"
-DATA_PATH = ROOT / "data" / "processed" / "train_processed_smote.csv"
-TEST_DATA_PATH = ROOT / "data" / "processed" / "test_processed.csv"
-THRESHOLD_PATH = MODEL_DIR / "best_threshold_f1.txt"
-
-# Resolve model: prefer the one saved by train.py, else first .pkl in models/
-preferred_model = MODEL_DIR / "lightgbm_optimized.pkl"
-candidate_pkls = sorted(MODEL_DIR.glob("*.pkl"))
-if preferred_model.exists():
-    MODEL_PATH = preferred_model
-elif candidate_pkls:
-    MODEL_PATH = candidate_pkls[0]
-else:
-    st.error(f"No model artifacts found in {MODEL_DIR}. Run the training pipeline first.")
-    raise SystemExit(1)
+DATA_DIR = ROOT / "src" / "data" / "processed"
+MODELS_DIR = ROOT / "models"
+RESULTS_DIR = ROOT / "results"
 
 
-# =========================================================
-# HELPERS
-# =========================================================
-def detect_target_col(df: pd.DataFrame) -> str:
-    return TARGET_COL if TARGET_COL in df.columns else ""
+# Compatibility for legacy pickles
+class ThresholdedClassifier:
+    def __init__(self, base_model, threshold: float = 0.5):
+        self.base_model = base_model
+        self.threshold = float(threshold)
+
+    def predict_proba(self, X):
+        return self.base_model.predict_proba(X)
+
+    def predict(self, X):
+        prob = self.predict_proba(X)[:, 1]
+        return (prob >= float(self.threshold)).astype(int)
 
 
-def drop_target_col(cols):
-    return [c for c in cols if c != TARGET_COL]
+def load_df(name: str) -> pd.DataFrame | None:
+    p = DATA_DIR / name
+    return pd.read_csv(p) if p.exists() else None
 
 
-def clean_xgb_config_string(cfg: str) -> str:
-    # Make SHAP/XGBoost config robust if needed (harmless for LightGBM/sklearn)
-    import re
-    cfg = re.sub(r'"\[([0-9eE+\-\.]+)\]"', r'\1', cfg)
-    cfg = re.sub(r'"base_score"\s*:\s*([^,}\]]+)', r'"base_score":\1', cfg)
-    return cfg
+def resolve_model_path() -> Path | None:
+    p = MODELS_DIR / "best_model.pkl"
+    if p.exists():
+        return p
+    cands = sorted(MODELS_DIR.glob("best_model_*.pkl"), key=lambda x: x.stat().st_mtime, reverse=True)
+    return cands[0] if cands else None
 
 
-def ensure_array(values):
-    # SHAP sometimes returns lists; convert to numpy array consistently
-    if isinstance(values, list):
-        # For binary classification TreeExplainer, it returns [class0, class1]; take positive class (index 1) if present.
-        if len(values) == 2:
-            return np.array(values[1])
-        return np.array(values[0] if values else [])
-    return np.array(values)
-
-
-def cast_like_training(df_like: pd.DataFrame, ref_df: pd.DataFrame) -> pd.DataFrame:
-    for col in df_like.columns:
-        if col in ref_df.columns:
-            try:
-                df_like[col] = df_like[col].astype(ref_df[col].dtype)
-            except Exception:
-                # If casting fails, try numeric coercion then fill
-                df_like[col] = pd.to_numeric(df_like[col], errors="coerce").fillna(ref_df[col].median() if pd.api.types.is_numeric_dtype(ref_df[col]) else 0)
-                try:
-                    df_like[col] = df_like[col].astype(ref_df[col].dtype)
-                except Exception:
-                    pass
-        else:
-            # Not present in training; keep as-is (it will be dropped when reindexing)
-            pass
-    return df_like
-
-
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_model_and_data():
-    # Load model
-    try:
-        model = joblib.load(MODEL_PATH)
-    except Exception as e:
-        st.error(f"Unable to load model at {MODEL_PATH}: {e}")
-        raise SystemExit(1)
-
-    # Load data
-    try:
-        df = pd.read_csv(DATA_PATH)
-    except Exception as e:
-        st.error(f"Unable to load data at {DATA_PATH}: {e}")
-        raise SystemExit(1)
-
-    target_col = detect_target_col(df)
-    feature_cols = drop_target_col(df.columns.tolist())
-
-    # Optional: configure XGBoost booster for SHAP (no-op for LightGBM/sklearn)
-    booster = None
-    try:
-        if hasattr(model, "get_booster"):
-            booster = model.get_booster()
-            cfg = booster.save_config()
-            cfg = clean_xgb_config_string(cfg)
-            booster.load_config(cfg)
-            if hasattr(booster, "feature_names"):
-                booster.feature_names = feature_cols
-    except Exception as e:
-        st.warning(f"Could not configure XGBoost booster; SHAP may fall back. Error: {e}")
-        booster = None
-
-    return model, booster, df, feature_cols, target_col
+    model_path = resolve_model_path()
+    model = joblib.load(model_path) if model_path else None
+    # unwrap legacy wrapper but preserve threshold
+    if model is not None and hasattr(model, "base_model"):
+        base = model.base_model
+        thr = getattr(model, "threshold", None)
+        if thr is not None and not hasattr(base, "threshold"):
+            try:
+                setattr(base, "threshold", float(thr))
+            except Exception:
+                pass
+        model = base
+    train_df = load_df("train_processed_smote.csv")
+    val_df = load_df("val_processed.csv")
+    test_df = load_df("test_processed.csv")
+    return model, model_path, train_df, val_df, test_df
 
 
-def get_expected_features(_model, feature_cols):
-    # Try to get feature names from model; fallback to passed feature_cols
-    try:
-        # XGBoost booster path
-        if hasattr(_model, "get_booster"):
-            booster_features = _model.get_booster().feature_names
-            if booster_features:
-                return [f for f in booster_features if f in feature_cols]
-    except Exception:
-        pass
-
-    # LightGBM/scikit-learn fallback
-    return feature_cols
+@st.cache_resource(show_spinner=False)
+def load_metrics():
+    p = RESULTS_DIR / "metrics.csv"
+    if p.exists():
+        return pd.read_csv(p)
+    return pd.DataFrame()
 
 
-# =========================================================
-# LOAD MODEL & DATA
-# =========================================================
-if not MODEL_PATH.exists():
-    st.error(f"Trained model not found at `{MODEL_PATH}`. Please run training first.")
-    raise SystemExit(1)
-
-if not DATA_PATH.exists():
-    st.error(f"Processed dataset not found at `{DATA_PATH}`. Please run preprocessing first.")
-    raise SystemExit(1)
-
-model, booster, data, feature_cols, target_col = load_model_and_data()
-if not target_col:
-    st.error(f"Target column '{TARGET_COL}' not found in dataset.")
-    raise SystemExit(1)
-
-expected_features = [c for c in feature_cols if c != TARGET_COL]
-background_X = data.reindex(columns=expected_features, fill_value=0)
-
-# Load the best threshold with a safe fallback, silently
-best_threshold = 0.50
-if THRESHOLD_PATH.exists():
-    try:
-        with open(THRESHOLD_PATH, "r") as f:
-            best_threshold = float(f.read().strip())
-    except Exception:
-        pass
-
-
-# =========================================================
-# SIDEBAR
-# =========================================================
-with st.sidebar:
-    st.header("Dataset Overview")
-    st.metric("Records", f"{len(data):,}")
-
-    if target_col in data.columns:
-        numeric_target = pd.to_numeric(data[target_col], errors="coerce")
-        if not numeric_target.dropna().empty:
-            no_show_rate = numeric_target.mean()
-            st.metric("No-show Rate", f"{no_show_rate:.1%}")
-
-    st.caption("Feature preview")
-    preview_cols = [c for c in expected_features[:6] if c in data.columns]
-    if target_col and target_col in data.columns:
-        preview_cols.append(target_col)
-    if preview_cols:
-        st.dataframe(data[preview_cols].head(), use_container_width=True)
-    else:
-        st.info("No feature columns available for preview.")
-
-    st.markdown("---")
-    st.header("Model Controls")
-    st.write(f"Model Type: {type(model).__name__}")
-    st.write(f"Model File: {MODEL_PATH.name}")
-    threshold = st.slider("Operating Threshold", min_value=0.0, max_value=1.0, value=float(best_threshold), step=0.01, help="Adjust to explore precision/recall trade-off.")
+# Friendly names for display
+FRIENDLY = {
+    "age": "Age",
+    "awaitingtime": "Waiting Time (days)",
+    "total_health_issues": "Total Health Issues",
+    "age_scholarship": "Age Ã— Insurance",
+    "sms_awaitingtime": "SMS Ã— Waiting Time",
+    "health_score": "Health Score",
+    "multiple_conditions": "Multiple Conditions",
+    "same_day_appointment": "Same-day Appointment",
+    "long_wait": "Long Wait",
+    "scheduledhour": "Scheduled Hour",
+    "appointmenthour": "Appointment Hour",
+    "scheduleddayofweek": "Scheduled Day of Week",
+    "appointmentdayofweek": "Appointment Day of Week",
+    "scheduleddayofmonth": "Scheduled Day of Month",
+    "isweekend": "Is Weekend",
+    "ismonthend": "Is Month End",
+    "ismonthstart": "Is Month Start",
+    "appointment_month": "Appointment Month",
+    "appointment_dayofyear": "Day of Year",
+    "gender": "Gender",
+    "scholarship": "Insurance",
+    "hypertension": "Hypertension",
+    "diabetes": "Diabetes",
+    "alcoholism": "Alcoholism",
+    "handicap": "Handicap",
+    "sms_received": "SMS Received",
+    "neighbourhood_te": "Neighbourhood Score",
+    "neighbourhood_freq": "Neighbourhood Frequency",
+    "no_show_label": "No-Show",
+}
 
 
-# =========================================================
-# TABS
-# =========================================================
-tab_predict, tab_explain, tab_performance, tab_about = st.tabs(
-    ["Prediction", "Explainability", "Model Performance", "About"]
-)
+def friendly(df: pd.DataFrame) -> pd.DataFrame:
+    return df.rename(columns={c: FRIENDLY.get(c, c) for c in df.columns})
 
 
-# =========================================================
-# TAB: PREDICTION
-# =========================================================
-with tab_predict:
-    st.subheader("Make a Prediction")
+def compute_metrics(y_true, y_prob, thr: float):
+    from sklearn.metrics import confusion_matrix, average_precision_score
 
-    if "prediction" not in st.session_state:
-        st.session_state.prediction = None
-    if "user_input_df" not in st.session_state:
-        st.session_state.user_input_df = None
-
-    # Simple, user-friendly inputs
-    day_name_to_int = {
-        "Monday": 0, "Tuesday": 1, "Wednesday": 2,
-        "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6,
+    y_pred = (y_prob >= thr).astype(int)
+    cm = confusion_matrix(y_true, y_pred)
+    tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    pr_auc = average_precision_score(y_true, y_prob)
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    roc_auc = auc(fpr, tpr)
+    spec = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    sens = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    return {
+        "F1": f1,
+        "Precision": prec,
+        "Recall": rec,
+        "ROC_AUC": roc_auc,
+        "PR_AUC": pr_auc,
+        "Specificity": spec,
+        "Sensitivity": sens,
+        "CM": cm,
+        "FPR": fpr,
+        "TPR": tpr,
     }
-    gender_to_num = {"Female": 0.0, "Male": 1.0, "Other/Unknown": 0.5}
 
-    def build_row_from_simple_inputs(df_processed: pd.DataFrame, inputs: dict) -> pd.DataFrame:
-        features_df = df_processed.drop(columns=[TARGET_COL])
-        baseline = features_df.median(numeric_only=True)
-        row = baseline.copy()
-        row["Gender"] = gender_to_num[inputs["gender"]]
-        row["Scholarship"] = int(inputs["scholarship"])
-        row["Hypertension"] = int(inputs["hypertension"])
-        row["Diabetes"] = int(inputs["diabetes"])
-        row["Alcoholism"] = int(inputs["alcoholism"])
-        row["Handicap"] = int(inputs["handicap"])
-        row["SMS_received"] = int(inputs["sms"])
-        row["ScheduledHour"] = int(inputs["scheduled_hour"])
-        row["AppointmentHour"] = int(inputs["appointment_hour"])
-        row["AppointmentDayOfWeek"] = day_name_to_int[inputs["appt_dow"]]
-        row["IsWeekend"] = 1 if row["AppointmentDayOfWeek"] in [5, 6] else 0
-        row["Appointment_Month"] = int(inputs["month"])
-        row["Same_Day_Appointment"] = 1 if inputs["same_day"] else 0
-        row["Multiple_Conditions"] = 1 if (row["Hypertension"] + row["Diabetes"] + row["Alcoholism"] + row["Handicap"]) > 1 else 0
-        row["Age_Scholarship"] = row.get("Age", 0) * row["Scholarship"]
-        row["SMS_AwaitingTime"] = row.get("AwaitingTime", 0) * row["SMS_received"]
-        row = row.reindex(index=expected_features, fill_value=0)
-        return row.to_frame().T
 
-    with st.form("simple_predict_form", clear_on_submit=False):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            gender = st.selectbox("Gender", list(gender_to_num.keys()), index=0)
-            scholarship = st.checkbox("Scholarship", value=False)
-            sms = st.checkbox("SMS received", value=False)
-        with col2:
-            hypertension = st.checkbox("Hypertension", value=False)
-            diabetes = st.checkbox("Diabetes", value=False)
-            alcoholism = st.checkbox("Alcoholism", value=False)
-        with col3:
-            handicap = st.selectbox("Handicap", [0, 1, 2], index=0)
-            appt_dow = st.selectbox("Appointment Day", list(day_name_to_int.keys()), index=0)
-            month = st.selectbox("Month", list(range(1, 13)), index=0)
+# App layout
+st.set_page_config(page_title="No-Show Prediction Dashboard", layout="wide")
+st.title("Patient Appointment No-Show: Project Dashboard")
 
-        col4, col5, col6 = st.columns(3)
-        with col4:
-            scheduled_hour = st.slider("Scheduled Hour", 0, 23, 9)
-        with col5:
-            appointment_hour = st.slider("Appointment Hour", 0, 23, 14)
-        with col6:
-            same_day = st.checkbox("Same-day appointment", value=False)
+model, model_path, train_df, val_df, test_df = load_model_and_data()
+metrics_df = load_metrics()
 
-        submitted = st.form_submit_button("Predict", use_container_width=True)
+tabs = st.tabs([
+    "Overview",
+    "Data",
+    "Preprocess",
+    "Models",
+    "Tuning",
+    "Performance",
+    "Explain",
+    "Business",
+    "Demo",
+])
 
-    if submitted:
-        simple_inputs = {
-            "gender": gender,
-            "scholarship": scholarship,
-            "hypertension": hypertension,
-            "diabetes": diabetes,
-            "alcoholism": alcoholism,
-            "handicap": handicap,
-            "sms": sms,
-            "appt_dow": appt_dow,
-            "month": month,
-            "scheduled_hour": scheduled_hour,
-            "appointment_hour": appointment_hour,
-            "same_day": same_day,
-        }
 
-        X_row = build_row_from_simple_inputs(data, simple_inputs)
-        X_row = cast_like_training(X_row, data.drop(columns=[TARGET_COL]))
-
-        try:
-            prob = float(model.predict_proba(X_row)[0, 1])
-        except Exception:
-            try:
-                prob = float(model.decision_function(X_row))
-                prob = 1.0 / (1.0 + np.exp(-prob))
-            except Exception as e:
-                st.error(f"Model cannot produce probability: {e}")
-                raise st.stop()
-
-        predicted_class = "No-Show" if prob >= float(threshold) else "Will Attend"
-        risk_level = (
-            ("High", "red") if prob >= float(threshold) + (1 - float(threshold)) * 0.2
-            else ("Medium", "orange") if prob >= float(threshold)
-            else ("Low", "green")
+# Overview
+with tabs[0]:
+    st.subheader("Project Overview")
+    st.write(
+        "We predict patient appointment no-shows to help clinics proactively reduce missed slots,"
+        " optimize scheduling, and focus reminders where they matter most. When a no-show is correctly predicted,"
+        " staff can call, remind, or reschedule. A missed no-show (false negative) wastes a time slot, while a false"
+        " positive is typically just an extra reminder."
+    )
+    st.markdown("### Dataset")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.write("The Medical Appointment No Shows dataset contains more than 110,000 records with features covering:")
+        st.markdown(
+            """
+            - Demographics (age, gender)  
+            - Scheduling details (appointment and scheduling times, waiting period)  
+            - Communication (SMS reminders)  
+            - Neighborhood information  
+            - Final show or no-show outcome
+            """
         )
-
-        st.session_state.prediction = {"prob": prob, "predicted_class": predicted_class, "risk_level": risk_level}
-        st.session_state.user_input_df = X_row.copy()
-
-    if st.session_state.prediction:
-        pred = st.session_state.prediction
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Prediction", pred["predicted_class"])
-        c2.metric("No-Show Probability", f"{pred['prob']:.1%}")
-        c3.metric("Risk Level", pred["risk_level"][0])
-        st.success(
-            f"Based on the selected information, the predicted risk of no-show is {pred['risk_level'][0]}."
-        )
-
-        with st.expander("Input features used for this prediction"):
-            st.dataframe(st.session_state.user_input_df)
-
-
-# =========================================================
-# TAB: EXPLAINABILITY
-# =========================================================
-with tab_explain:
-    st.subheader("SHAP Explainability")
-
-    if not st.session_state.get("prediction"):
-        st.info("Run a prediction from the 'Prediction' tab to unlock SHAP explanations.")
-    else:
-        user_df = st.session_state.get("user_input_df")
-        if user_df is None or background_X.empty:
-            st.warning("Cannot compute SHAP values without the patient's input or background data.")
-            if user_df is None:
-                st.info("Please run a prediction to capture the latest patient inputs.")
-            if background_X.empty:
-                st.error("Background data is empty. Check data loading.")
-            st.stop()
-
-        st.info("Calculating SHAP values on a background sample (up to 100 rows)...")
-        progress_bar = st.progress(0)
-
-        explainer = None
-        shap_sample_size = min(100, len(background_X))
-        shap_sample = background_X.sample(shap_sample_size, random_state=42)
-
-        try:
-            # Tree-based models typically work with TreeExplainer (LightGBM is supported)
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(shap_sample)
-            user_shap = explainer.shap_values(user_df)
-        except Exception:
-            # Fallback to KernelExplainer (slower)
-            try:
-                f = lambda X: model.predict_proba(pd.DataFrame(X, columns=expected_features))[:, 1]
-                explainer = shap.KernelExplainer(f, shap_sample)
-                shap_values = explainer.shap_values(shap_sample, nsamples=100)
-                user_shap = explainer.shap_values(user_df, nsamples=100)
-            except Exception as e:
-                st.error(f"Could not compute SHAP values: {e}")
-                st.stop()
-
-        shap_values = ensure_array(shap_values)
-        user_shap = ensure_array(user_shap)
-        progress_bar.progress(50)
-
-        # Show top features for the specific prediction
-        if user_shap.ndim > 1:
-            user_contrib = user_shap[0]
-        else:
-            user_contrib = user_shap
-
-        if user_contrib.ndim == 1 and len(user_contrib) == len(expected_features):
-            shap_importance = np.abs(shap_values).mean(axis=0)
-            sorted_idx = np.argsort(shap_importance)[::-1]
-
-            st.markdown("#### Top Factors Driving This Prediction")
-            num_top = min(5, len(expected_features))
-            for i in range(num_top):
-                feat_idx = sorted_idx[i]
-                feature = expected_features[feat_idx]
-                shap_value = user_contrib[feat_idx]
-                direction = "increases" if shap_value > 0 else ("decreases" if shap_value < 0 else "has little impact on")
-                input_value = user_df.iloc[0, feat_idx] if feature in user_df.columns else "n/a"
-                st.write(f"- {feature} (input: {input_value}) {direction} the no-show probability (SHAP: {shap_value:.3f}).")
-
-            with st.expander("SHAP Summary Plot (Overall Feature Importance)"):
-                plt.clf()
-                fig, ax = plt.subplots(figsize=(10, 5))
-                try:
-                    shap.summary_plot(shap_values, shap_sample, feature_names=expected_features, show=False, max_display=10)
-                    st.pyplot(fig)
-                except Exception as e:
-                    st.warning(f"Could not render SHAP summary plot: {e}")
-
-        else:
-            st.warning("SHAP values could not be computed in the expected format for this prediction.")
-
-        progress_bar.progress(100)
-
-
-# =========================================================
-# TAB: MODEL PERFORMANCE
-# =========================================================
-with tab_performance:
-    st.subheader("Model Evaluation (Test Set)")
-
-    if not TEST_DATA_PATH.exists():
-        st.warning(f"Test data not found at {TEST_DATA_PATH}. Cannot display performance metrics.")
-    else:
-        try:
-            test_df = pd.read_csv(TEST_DATA_PATH)
-            if TARGET_COL not in test_df.columns:
-                st.warning(f"Target column '{TARGET_COL}' not found in test data.")
-            else:
-                X_test = test_df.drop(columns=[TARGET_COL]).reindex(columns=expected_features, fill_value=0)
-                y_test = test_df[TARGET_COL].astype(int)
-                X_test = cast_like_training(X_test, data.drop(columns=[TARGET_COL]))
-
-                if not X_test.empty and not y_test.empty:
-                    y_prob = model.predict_proba(X_test)[:, 1]
-                    y_pred = (y_prob >= float(threshold)).astype(int)
-
-                    # KPI cards
-                    acc = float((y_pred == y_test).mean())
-                    prec = precision_score(y_test, y_pred, zero_division=0)
-                    rec = recall_score(y_test, y_pred, zero_division=0)
-                    f1 = f1_score(y_test, y_pred, zero_division=0)
-                    roc = roc_auc_score(y_test, y_prob)
-                    pr_auc = average_precision_score(y_test, y_prob)
-
-                    k1, k2, k3, k4 = st.columns(4)
-                    k1.metric("Accuracy", f"{acc:.1%}")
-                    k2.metric("F1 Score", f"{f1:.3f}")
-                    k3.metric("Precision", f"{prec:.3f}")
-                    k4.metric("Recall", f"{rec:.3f}")
-                    st.caption(f"ROC AUC: {roc:.3f}  •  PR AUC: {pr_auc:.3f}")
-
-                    # Classification report
-                    st.markdown("#### Classification Report")
-                    st.code(classification_report(y_test, y_pred, target_names=["Show", "No-Show"]))
-
-                    # Confusion matrix
-                    st.markdown("#### Confusion Matrix")
-                    cm = confusion_matrix(y_test, y_pred)
-                    fig, ax = plt.subplots()
-                    sns.heatmap(
-                        cm, annot=True, fmt="d", cmap="Blues", cbar=False,
-                        xticklabels=["Predicted Show", "Predicted No-Show"],
-                        yticklabels=["Actual Show", "Actual No-Show"], ax=ax
-                    )
-                    ax.set_xlabel("Predicted Label")
-                    ax.set_ylabel("Actual Label")
-                    st.pyplot(fig)
-
-                    # Curves
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.markdown("#### ROC Curve")
-                        fpr, tpr, _ = roc_curve(y_test, y_prob)
-                        fig2, ax2 = plt.subplots()
-                        ax2.plot(fpr, tpr, label=f"ROC AUC = {roc:.3f}")
-                        ax2.plot([0, 1], [0, 1], "k--")
-                        ax2.set_xlabel("False Positive Rate")
-                        ax2.set_ylabel("True Positive Rate")
-                        ax2.legend()
-                        st.pyplot(fig2)
-                    with c2:
-                        st.markdown("#### Precision-Recall Curve")
-                        pr, rc, _ = precision_recall_curve(y_test, y_prob)
-                        fig3, ax3 = plt.subplots()
-                        ax3.plot(rc, pr, label=f"PR AUC = {pr_auc:.3f}")
-                        ax3.set_xlabel("Recall")
-                        ax3.set_ylabel("Precision")
-                        ax3.legend()
-                        st.pyplot(fig3)
-
-                    # Score distribution
-                    with st.expander("Score Distribution (Predicted Probabilities)"):
-                        fig4, ax4 = plt.subplots()
-                        sns.histplot(y_prob, bins=30, kde=True, ax=ax4)
-                        ax4.axvline(float(threshold), color='red', linestyle='--', label='Threshold')
-                        ax4.set_xlabel('No-Show Probability')
-                        ax4.legend()
-                        st.pyplot(fig4)
-
-                    # Download predictions
-                    pred_df = pd.DataFrame({
-                        'y_true': y_test.values,
-                        'y_prob': y_prob,
-                        'y_pred': y_pred,
-                    })
-                    st.download_button(
-                        label="Download Predictions (CSV)",
-                        data=pred_df.to_csv(index=False).encode('utf-8'),
-                        file_name='predictions_test.csv',
-                        mime='text/csv'
-                    )
-                else:
-                    st.warning("Test data loaded but appears empty or missing target column after processing.")
-
-        except Exception as e:
-            st.error(f"Error evaluating model performance on test set: {e}")
-
-
-# =========================================================
-# TAB: ABOUT
-# =========================================================
-with tab_about:
-    st.subheader("About This Project")
+    with col2:
+        st.info("View Dataset: [Kaggle – Medical Appointment No Shows](https://www.kaggle.com/datasets/joniarroba/noshowappointments)")
+ 
     st.markdown(
         """
-        - Goal: Predict whether a patient will show up to their medical appointment.
-        - Model: Best performing LightGBM model (saved to models/lightgbm_optimized.pkl).
-        - Explainability: SHAP to inspect feature impact on predictions.
-        - Threshold: Use the sidebar slider to explore precision/recall trade-offs.
+      
+        We trained Logistic Regression and Random Forest baselines and a LightGBM model. We compared them on the validation set using
+        F1, recall, precision, and ROC AUC. LightGBM delivered the best overall balance, and we tuned its decision threshold on the
+        validation set to maximize F1. The tuned best model is saved and used for the final evaluation on the held-out test set.
         """
     )
-    st.markdown("---")
-    st.markdown("Built with Streamlit; see preprocessing/training scripts in the repo.")
+
+
+# Data
+with tabs[1]:
+    st.subheader("Dataset Overview")
+    c1, c2, c3 = st.columns(3)
+    if train_df is not None:
+        c1.metric("Train rows", f"{len(train_df):,}")
+    if val_df is not None:
+        c2.metric("Validation rows", f"{len(val_df):,}")
+    if test_df is not None:
+        c3.metric("Test rows", f"{len(test_df):,}")
+    if val_df is not None:
+        st.write("Class balance (Validation)")
+        vc = val_df["no_show_label"].value_counts(normalize=True).rename(index={0: "Show", 1: "No-Show"})
+        fig, ax = plt.subplots(figsize=(6, 4))
+        sns.barplot(x=vc.index, y=vc.values, ax=ax)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel("Proportion")
+        st.pyplot(fig, use_container_width=True)
+        st.caption("Validation shows class imbalance; this motivates class weighting and threshold tuning.")
+    if train_df is not None:
+        st.write("Sample of training features")
+        st.dataframe(friendly(train_df.head(10)))
+
+
+# Preprocess
+with tabs[2]:
+    st.subheader("Cleaning, Balancing, and Feature Engineering")
+    st.write(
+        "Data is cleaned, new time and risk features are created, and class imbalance is handled with SMOTE"
+        " on the training split."
+    )
+    if val_df is not None and train_df is not None:
+        colA, colB = st.columns(2)
+        vc_before = val_df["no_show_label"].value_counts(normalize=True)
+        fig_b, ax_b = plt.subplots(figsize=(6, 4))
+        sns.barplot(x=["Show", "No-Show"], y=[vc_before.get(0, 0.0), vc_before.get(1, 0.0)], ax=ax_b)
+        ax_b.set_ylim(0, 1)
+        ax_b.set_ylabel("Proportion")
+        ax_b.set_title("Before (Validation)")
+        colA.pyplot(fig_b)
+        colA.caption("Validation is imbalanced with a smaller share of no-shows.")
+        vc_after = train_df["no_show_label"].value_counts(normalize=True)
+        fig_a, ax_a = plt.subplots(figsize=(6, 4))
+        sns.barplot(x=["Show", "No-Show"], y=[vc_after.get(0, 0.0), vc_after.get(1, 0.0)], ax=ax_a)
+        ax_a.set_ylim(0, 1)
+        ax_a.set_ylabel("Proportion")
+        ax_a.set_title("After SMOTE (Training)")
+        colB.pyplot(fig_a)
+        colB.caption("Training is balanced to help models learn signals from the minority class.")
+    if val_df is not None:
+        vf = friendly(val_df)
+        feat_names = [
+            "Waiting Time (days)",
+            "Long Wait",
+            "Same-day Appointment",
+            "Scheduled Hour",
+            "Appointment Hour",
+            "Appointment Month",
+        ]
+        present = [c for c in feat_names if c in vf.columns]
+        if present:
+            cols = st.columns(3)
+            interpretations = {
+                "Waiting Time (days)": "Longer waits tend to increase no-show risk.",
+                "Long Wait": "Extended waiting time is a risk indicator.",
+                "Same-day Appointment": "Same-day bookings can behave differently.",
+                "Scheduled Hour": "Time of day may shift attendance.",
+                "Appointment Hour": "Later hours may correlate with higher risk.",
+                "Appointment Month": "Seasonal patterns may exist across months.",
+            }
+            for i, c in enumerate(present[:3]):
+                fig_f, ax_f = plt.subplots(figsize=(6, 4))
+                sns.histplot(vf[c], ax=ax_f, kde=False)
+                ax_f.set_title(c)
+                cols[i].pyplot(fig_f)
+                cols[i].caption(interpretations.get(c, "Distribution helps spot skew and outliers."))
+
+
+# Models
+with tabs[3]:
+    st.subheader("Model Choices")
+    st.write("We combine simple and powerful models suited to structured healthcare data and class imbalance.")
+    comp = pd.DataFrame([
+        {"Model": "Logistic Regression", "Strengths": "Fast, interpretable, calibrated", "Limits": "Linear boundary", "Why here": "Clear baseline for precision/recall"},
+        {"Model": "Random Forest", "Strengths": "Non-linear, robust, low tuning", "Limits": "Larger models", "Why here": "Captures interactions and risk flags"},
+        {"Model": "LightGBM", "Strengths": "State-of-the-art on tabular, fast", "Limits": "More knobs", "Why here": "Best accuracy/recall trade-off"},
+    ])
+    st.table(comp)
+    with st.expander("Why not other models?"):
+        st.markdown(
+            "SVMs can work but scale poorly and require calibration; k-NN is slow at inference and struggles with many features; "
+            "Naive Bayes assumes independence; deep learning often underperforms on tabular data; XGBoost is comparable but LightGBM trains faster here."
+        )
+
+
+# Tuning
+with tabs[4]:
+    st.subheader("Hyperparameter and Threshold Tuning")
+    st.write(
+        "LightGBM hyperparameters (depth, leaves, learning rate, regularization) are tuned with Optuna to improve validation F1/recall. "
+        "Random Forest can be tuned with GridSearchCV (estimators, depth, min samples). We compare validation results across models and then tune "
+        "the decision threshold for the best performer to maximize F1."
+    )
+    if model is not None and val_df is not None:
+        Xv = val_df.drop(columns=["no_show_label"])  # original feature names
+        yv = val_df["no_show_label"].astype(int)
+        prob = model.predict_proba(Xv)[:, 1]
+        st.write("Adjust the decision threshold to see how performance changes")
+        thr = st.slider("Classification threshold", 0.0, 1.0, float(getattr(model, "threshold", 0.5)), 0.01)
+        pred = (prob >= thr).astype(int)
+        from sklearn.metrics import confusion_matrix, roc_auc_score
+        precision = precision_score(yv, pred, zero_division=0)
+        recall = recall_score(yv, pred, zero_division=0)
+        f1 = f1_score(yv, pred, zero_division=0)
+        roc_auc = roc_auc_score(yv, prob)
+        tn, fp, fn, tp = confusion_matrix(yv, pred).ravel()
+        specificity = tn / (tn + fp) if (tn + fp) else 0.0
+        sensitivity = tp / (tp + fn) if (tp + fn) else 0.0
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Precision", f"{precision:.3f}")
+            st.metric("Recall", f"{recall:.3f}")
+        with col2:
+            st.metric("F1 Score", f"{f1:.3f}")
+            st.metric("ROC AUC", f"{roc_auc:.3f}")
+        with col3:
+            st.metric("Specificity", f"{specificity:.3f}")
+            st.metric("Sensitivity", f"{sensitivity:.3f}")
+        pr_p, pr_r, _ = precision_recall_curve(yv, prob)
+        fpr, tpr, _ = roc_curve(yv, prob)
+        c1, c2 = st.columns(2)
+        fig_pr, ax_pr = plt.subplots(figsize=(6, 4))
+        ax_pr.plot(pr_r, pr_p)
+        ax_pr.set_xlabel("Recall")
+        ax_pr.set_ylabel("Precision")
+        ax_pr.set_title("Precision-Recall")
+        c1.pyplot(fig_pr)
+        fig_roc, ax_roc = plt.subplots(figsize=(6, 4))
+        ax_roc.plot(fpr, tpr)
+        ax_roc.plot([0, 1], [0, 1], "k--")
+        ax_roc.set_xlabel("FPR")
+        ax_roc.set_ylabel("TPR")
+        ax_roc.set_title("ROC Curve")
+        c2.pyplot(fig_roc)
+        st.markdown("### Confusion Matrix")
+        fig_cm, ax_cm = plt.subplots(figsize=(6, 4))
+        sns.heatmap([[tn, fp], [fn, tp]], annot=True, fmt="d", cmap="Blues", cbar=False, ax=ax_cm,
+                    xticklabels=["Predicted Show", "Predicted No-Show"],
+                    yticklabels=["Actual Show", "Actual No-Show"])
+        ax_cm.set_xlabel("")
+        ax_cm.set_ylabel("")
+        st.pyplot(fig_cm)
+    else:
+        st.warning("Load data and train a model to explore thresholds.")
+
+
+# Performance
+with tabs[5]:
+    st.subheader("Model Performance")
+    if not metrics_df.empty:
+        ranked = metrics_df.copy()
+        if "Variant" not in ranked.columns:
+            ranked["Variant"] = ""
+        ranked = ranked.sort_values(by="F1", ascending=False)
+        st.dataframe(ranked)
+        st.caption(
+            "Validation results from results/metrics.csv sorted by F1. We select the best model by F1 and tune its threshold. The tuned model is saved as models/best_model.pkl and used for the final test evaluation below."
+        )
+    else:
+        st.warning("No validation metrics found. Run training first.")
+    st.markdown("Final evaluation on the test set")
+    if model is not None and test_df is not None:
+        Xte = test_df.drop(columns=["no_show_label"])  # original names
+        yte = test_df["no_show_label"].astype(int)
+        prob_te = model.predict_proba(Xte)[:, 1]
+        thr_te = float(getattr(model, "threshold", 0.5))
+        m = compute_metrics(yte, prob_te, thr_te)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("F1", f"{m['F1']:.3f}")
+        c2.metric("Precision", f"{m['Precision']:.3f}")
+        c3.metric("Recall", f"{m['Recall']:.3f}")
+        c4.metric("ROC AUC", f"{m['ROC_AUC']:.3f}")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("PR AUC", f"{m['PR_AUC']:.3f}")
+        d2.metric("Sensitivity", f"{m['Sensitivity']:.3f}")
+        d3.metric("Specificity", f"{m['Specificity']:.3f}")
+        fig_cm, ax_cm = plt.subplots(figsize=(6, 4))
+        sns.heatmap(m["CM"], annot=True, fmt="d", cmap="Blues", ax=ax_cm, cbar=False)
+        ax_cm.set_xlabel("Predicted")
+        ax_cm.set_ylabel("Actual")
+        ax_cm.set_title("Confusion Matrix (Test)")
+        st.pyplot(fig_cm)
+        c5, c6 = st.columns(2)
+        fig_pr2, ax_pr2 = plt.subplots(figsize=(6, 4))
+        pr_p2, pr_r2, _ = precision_recall_curve(yte, prob_te)
+        ax_pr2.plot(pr_r2, pr_p2)
+        ax_pr2.set_xlabel("Recall")
+        ax_pr2.set_ylabel("Precision")
+        ax_pr2.set_title("Precision-Recall")
+        c5.pyplot(fig_pr2)
+        fig_roc2, ax_roc2 = plt.subplots(figsize=(6, 4))
+        ax_roc2.plot(m["FPR"], m["TPR"]) 
+        ax_roc2.plot([0, 1], [0, 1], "k--")
+        ax_roc2.set_xlabel("FPR")
+        ax_roc2.set_ylabel("TPR")
+        ax_roc2.set_title("ROC Curve")
+        c6.pyplot(fig_roc2)
+        st.caption(
+            "Test metrics use the tuned threshold saved with the model. Sensitivity is the share of no-shows correctly identified; specificity is the share of shows correctly identified. F1 summarizes precision/recall balance."
+        )
+    else:
+        st.warning("Best model or test set not found.")
+
+
+# Explain
+with tabs[6]:
+    st.subheader("Model Explanation (SHAP)")
+    if model is None or val_df is None:
+        st.warning("Train and evaluate a model first.")
+    else:
+        try:
+            import shap
+            base_model = getattr(model, "base_model", model)
+            sample_n = min(500, len(val_df))
+            X_sample = val_df.sample(n=sample_n, random_state=42)
+            X_sample_disp = friendly(X_sample.drop(columns=["no_show_label"]))
+            X_sample_model = X_sample.drop(columns=["no_show_label"])  # original names
+            try:
+                explainer = shap.TreeExplainer(base_model)
+                shap_values = explainer.shap_values(X_sample_model)
+                sv = shap_values[1] if isinstance(shap_values, list) else shap_values
+            except Exception:
+                explainer = shap.Explainer(base_model, X_sample_model)
+                sv = explainer(X_sample_model)
+            st.write("Overall feature influence")
+            fig1 = plt.figure(figsize=(8, 4))
+            shap.summary_plot(sv, X_sample_disp, show=False)
+            st.pyplot(fig1, use_container_width=True)
+            st.write("Most important features")
+            fig2 = plt.figure(figsize=(8, 4))
+            shap.summary_plot(sv, X_sample_disp, plot_type="bar", show=False)
+            st.pyplot(fig2, use_container_width=True)
+            st.caption("Clear names connect insights to actions, such as focusing on long waits or reminders.")
+            st.write("Why was this patient flagged?")
+            idx = st.number_input("Pick a validation row index", min_value=0, max_value=len(X_sample_model)-1, value=0, step=1)
+            try:
+                row = X_sample_model.iloc[int(idx):int(idx)+1]
+                row_disp = X_sample_disp.iloc[int(idx):int(idx)+1]
+                try:
+                    sv_single = shap.TreeExplainer(base_model).shap_values(row)
+                    sv_single = sv_single[1] if isinstance(sv_single, list) else sv_single
+                    shap_vals = sv_single[0]
+                except Exception:
+                    exp = shap.Explainer(base_model, X_sample_model)(row)
+                    shap_vals = exp.values[0]
+                contrib = pd.Series(shap_vals, index=row_disp.columns).sort_values(key=np.abs, ascending=False)[:10]
+                fig_local, ax_local = plt.subplots(figsize=(6, 4))
+                colors = ["#1f77b4" if v < 0 else "#d62728" for v in contrib[::-1].values]
+                contrib[::-1].plot(kind="barh", ax=ax_local, color=colors)
+                ax_local.set_title("Top feature contributions (local)")
+                st.pyplot(fig_local, use_container_width=True)
+            except Exception as e:
+                st.info(f"Local explanation unavailable: {e}")
+        except Exception as e:
+            st.error(f"SHAP could not run: {e}")
+
+
+# Business
+with tabs[7]:
+    st.subheader("Business Impact")
+    st.write(
+        "Use the model to flag high-risk appointments for reminders or rescheduling. Improving recall reduces missed slots; "
+        "a moderate precision trade-off is often acceptable operationally."
+    )
+    if model is not None and test_df is not None:
+        Xte = test_df.drop(columns=["no_show_label"]) 
+        yte = test_df["no_show_label"].astype(int)
+        prob = model.predict_proba(Xte)[:, 1]
+        thr = float(getattr(model, "threshold", 0.5))
+        m = compute_metrics(yte, prob, thr)
+        base_no_show_rate = yte.mean()
+        st.write(f"Approximate no-show rate in test: {base_no_show_rate:.1%}")
+        assumed_appointments = st.number_input("Appointments per week", min_value=100, max_value=10000, value=1000, step=50)
+        expected_no_shows = assumed_appointments * base_no_show_rate
+        caught = expected_no_shows * m["Sensitivity"]
+        st.write(f"Expected no-shows: {expected_no_shows:.1f}; caught by model: {caught:.1f}")
+        st.caption("Simple planning aid; integrate with scheduling to track outcomes.")
+
+
+# Demo
+with tabs[8]:
+    st.subheader("Model Inference Demo")
+    if model is not None and test_df is not None:
+        st.write("Select a test row and tweak values to see the prediction.")
+        idx = st.number_input("Row index", min_value=0, max_value=len(test_df)-1, value=0)
+        row = test_df.drop(columns=["no_show_label"]).iloc[int(idx)].copy()
+        age = st.slider("Age", 0, 100, int(row.get("age", 30)))
+        wait = st.slider("Waiting Time (days)", 0, 100, int(row.get("awaitingtime", 5)))
+        sms = st.selectbox("SMS Received", [0, 1], index=int(row.get("sms_received", 0)))
+        ins = st.selectbox("Insurance", [0, 1], index=int(row.get("scholarship", 0)))
+        same_day = st.selectbox("Same-day Appointment", [0, 1], index=int(row.get("same_day_appointment", 0)))
+        row.update({
+            "age": age,
+            "awaitingtime": wait,
+            "sms_received": sms,
+            "scholarship": ins,
+            "same_day_appointment": same_day,
+        })
+        X = pd.DataFrame([row])
+        prob = float(model.predict_proba(X)[:, 1][0])
+        thr = float(getattr(model, "threshold", 0.5))
+        pred = int(prob >= thr)
+        st.metric("Predicted no-show probability", f"{prob:.3f}")
+        st.metric("Decision", "No-Show" if pred == 1 else "Show")
+    else:
+        st.warning("Train and evaluate a model to enable the demo.")

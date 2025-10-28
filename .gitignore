@@ -133,18 +133,7 @@ dmypy.json
 .env.local
 .env.*.local
 
-# Project specific
-# Data files (keep structure but ignore large files)
-data/raw/*.csv
-data/processed/*.csv
-!data/raw/.gitkeep
-!data/processed/.gitkeep
 
-# Model files
-models/*.joblib
-models/*.pkl
-models/*.h5
-models/*.model
 
 # Logs
 *.log
@@ -172,14 +161,5 @@ Thumbs.db
 temp/
 tmp/
 
-# Results and outputs
-results/
-outputs/
-*.png
-*.jpg
-*.jpeg
-*.pdf
-!README.md
 
-# Streamlit
-.streamlit/
+

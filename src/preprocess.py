@@ -1,170 +1,191 @@
-"""Preprocessing pipeline for Patient Appointment No-Show dataset.
+"""
+🤖 Training pipeline for Patient Appointment No-Show prediction
 
-Reads raw CSV, engineers features, splits into train/val/test,
-applies SMOTE to the training split, and saves processed CSVs under
-`data/processed/` relative to the project root.
+- Stage 1: Train Logistic Regression, Random Forest, LightGBM (baseline)
+- Stage 2: Fine-tune Random Forest (GridSearchCV) and LightGBM (Optuna)
+- Save all metrics to results/metrics.csv (append, not overwrite)
+- Save best model artifact in models/
 """
 
 from pathlib import Path
-
-import numpy as np
+import warnings
+import joblib
+import optuna
 import pandas as pd
-from category_encoders import TargetEncoder
-from imblearn.over_sampling import SMOTE
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 
+from sklearn.model_selection import GridSearchCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from lightgbm import LGBMClassifier
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
 
-# -------------------------------
-# 1. Load and Parse Dates
-# -------------------------------
-ROOT = Path(__file__).resolve().parents[1]
-data_path = ROOT / "MedicalCentre.csv"
-print(f"Loading data from: {data_path}")
-df = pd.read_csv(data_path)
+warnings.filterwarnings("ignore")
 
-# Convert date columns to datetime
-print("Converting dates...")
-df["ScheduledDay"] = pd.to_datetime(df["ScheduledDay"])
-df["AppointmentDay"] = pd.to_datetime(df["AppointmentDay"])
+# =====================================================
+# 0. Helper functions
+# =====================================================
+def create_dirs():
+    root = Path(__file__).resolve().parents[1]
+    dirs = {
+        "root": root,
+        "data": root/"src" / "data" / "processed",
+        "models": root / "models",
+        "results": root / "results",
+    }
+    for d in dirs.values():
+        if isinstance(d, Path):
+            d.mkdir(parents=True, exist_ok=True)
+    return dirs
 
-# Calculate waiting time
-print("Calculating waiting time...")
-df["AwaitingTime"] = (
-    df["AppointmentDay"] - df["ScheduledDay"]
-).dt.total_seconds() / (24 * 60 * 60)
+def load_data(dirs):
+    print("📥 Loading processed data...")
+    train_df = pd.read_csv(dirs["data"] / "train_processed_smote.csv")
+    val_df = pd.read_csv(dirs["data"] / "val_processed.csv")
 
-# Print column names to verify
-print("\nAvailable columns:")
-print(df.columns.tolist())
+    X_train = train_df.drop(columns=["no_show_label"])
+    y_train = train_df["no_show_label"]
+    X_val = val_df.drop(columns=["no_show_label"])
+    y_val = val_df["no_show_label"]
 
-# -------------------------------
-# 2. Basic Cleaning
-# -------------------------------
-print("\nCleaning data...")
-df = df.drop_duplicates()
-df = df[df["Age"] >= 0]
-df.loc[df["Age"] > 115, "Age"] = 115
-df["Age"] = df["Age"].fillna(df["Age"].median())
+    return X_train, X_val, y_train, y_val
 
-cat_cols = [
-    "Gender",
-    "Neighbourhood",
-    "Scholarship",
-    "Hypertension",
-    "Diabetes",
-    "Alcoholism",
-    "Handicap",
-    "SMS_received",
-]
-df[cat_cols] = df[cat_cols].fillna("Unknown")
+def evaluate(model, X_val, y_val, name, label="baseline"):
+    """Evaluate model performance on validation set."""
+    y_pred = model.predict(X_val)
+    y_prob = model.predict_proba(X_val)[:, 1]
+    return {
+        "Model": name,
+        "Type": label,
+        "F1": f1_score(y_val, y_pred),
+        "Precision": precision_score(y_val, y_pred),
+        "Recall": recall_score(y_val, y_pred),
+        "ROC_AUC": roc_auc_score(y_val, y_prob),
+        "Run_Timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
 
-# -------------------------------
-# 3. Enhanced Feature Engineering
-# -------------------------------
-print("Engineering features...")
-# Time-based features
-df["ScheduledHour"] = df["ScheduledDay"].dt.hour
-df["AppointmentHour"] = df["AppointmentDay"].dt.hour
-df["ScheduledDayOfWeek"] = df["ScheduledDay"].dt.dayofweek
-df["AppointmentDayOfWeek"] = df["AppointmentDay"].dt.dayofweek
-df["ScheduledDayOfMonth"] = df["ScheduledDay"].dt.day
-df["IsWeekend"] = df["AppointmentDayOfWeek"].isin([5, 6]).astype(int)
-df["IsMonthEnd"] = df["AppointmentDay"].dt.is_month_end.astype(int)
-df["IsMonthStart"] = df["AppointmentDay"].dt.is_month_start.astype(int)
-df["Appointment_Month"] = df["AppointmentDay"].dt.month
-df["Appointment_DayOfYear"] = df["AppointmentDay"].dt.dayofyear
+def save_metrics(metrics_list, dirs):
+    """Append metrics to metrics.csv instead of overwriting."""
+    results_file = dirs["results"] / "metrics.csv"
+    current = pd.DataFrame(metrics_list)
+    if results_file.exists():
+        old = pd.read_csv(results_file)
+        out = pd.concat([old, current], ignore_index=True)
+    else:
+        out = current
+    out.to_csv(results_file, index=False)
+    print(f"📊 Metrics saved/updated at {results_file}")
 
-# Health and appointment features
-df["Total_Health_Issues"] = df[["Hypertension", "Diabetes", "Alcoholism", "Handicap"]].sum(axis=1)
-df["Age_Scholarship"] = df["Age"] * df["Scholarship"].astype(float)
-df["SMS_AwaitingTime"] = df["SMS_received"].astype(float) * df["AwaitingTime"]
-df["Health_Score"] = df["Total_Health_Issues"]
-df["Multiple_Conditions"] = (df["Health_Score"] > 1).astype(int)
-df["Same_Day_Appointment"] = (df["AwaitingTime"] == 0).astype(int)
-df["Long_Wait"] = (df["AwaitingTime"] > df["AwaitingTime"].median()).astype(int)
+# =====================================================
+# 1. Baseline training
+# =====================================================
+def train_baseline_models(X_train, X_val, y_train, y_val):
+    models = {}
+    metrics = []
 
-# -------------------------------
-# 4. Scale Numerical Features
-# -------------------------------
-print("Scaling numerical features...")
-num_features = ["Age", "AwaitingTime", "Total_Health_Issues"]
-scaler = StandardScaler()
-df[num_features] = scaler.fit_transform(df[num_features])
+    #  Logistic Regression
+    print("Training Logistic Regression (baseline)...")
+    lr = LogisticRegression(max_iter=500)
+    lr.fit(X_train, y_train)
+    models["LogisticRegression_baseline"] = lr
+    metrics.append(evaluate(lr, X_val, y_val, "LogisticRegression"))
 
-# -------------------------------
-# 5. Encode Categorical
-# -------------------------------
-print("Encoding categorical features...")
-# Target encoding for Neighbourhood
-encoder = TargetEncoder()
-df["Neighbourhood_encoded"] = encoder.fit_transform(
-    df["Neighbourhood"], df["No-show"].map({"Yes": 1, "No": 0})
-)
+    # Random Forest
+    print("Training Random Forest (baseline)...")
+    rf = RandomForestClassifier(n_estimators=300, random_state=42)
+    rf.fit(X_train, y_train)
+    models["RandomForest_baseline"] = rf
+    metrics.append(evaluate(rf, X_val, y_val, "RandomForest"))
 
-# Neighbourhood frequency encoding
-freq = df["Neighbourhood"].value_counts(normalize=True)
-df["Neighbourhood_freq"] = df["Neighbourhood"].map(freq)
-df.drop(columns=["Neighbourhood"], inplace=True, errors="ignore")
+    #  LightGBM
+    print("Training LightGBM (baseline)...")
+    lgbm = LGBMClassifier(n_estimators=300, learning_rate=0.05, random_state=42)
+    lgbm.fit(X_train, y_train)
+    models["LightGBM_baseline"] = lgbm
+    metrics.append(evaluate(lgbm, X_val, y_val, "LightGBM"))
 
-# Binary encoding
-df["Gender"] = df["Gender"].map({"M": 1, "F": 0, "Unknown": 0.5}).astype(float)
-binary_cols = [
-    "Scholarship",
-    "Hypertension",
-    "Diabetes",
-    "Alcoholism",
-    "Handicap",
-    "SMS_received",
-]
-for col in binary_cols:
-    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    return models, metrics
 
-# -------------------------------
-# 6. Target
-# -------------------------------
-print("Preparing target variable...")
-df["No_show_label"] = df["No-show"].map({"Yes": 1, "No": 0})
-df.drop(columns=["No-show", "ScheduledDay", "AppointmentDay"], inplace=True, errors="ignore")
+# =====================================================
+# 2. Fine-tuning Random Forest (GridSearchCV)
+# =====================================================
+def finetune_random_forest(X_train, y_train):
+    print("🌲 Fine-tuning Random Forest with GridSearchCV...")
+    param_grid = {
+        "n_estimators": [200, 300, 500],
+        "max_depth": [None, 10, 20],
+        "min_samples_split": [2, 5],
+        "max_features": ["sqrt", "log2"]
+    }
+    grid = GridSearchCV(
+        RandomForestClassifier(random_state=42),
+        param_grid,
+        scoring="f1",
+        cv=3,
+        n_jobs=-1,
+        verbose=1
+    )
+    grid.fit(X_train, y_train)
+    print("✅ Best RF params:", grid.best_params_)
+    return grid.best_estimator_
 
-# -------------------------------
-# 7. Train / Validation / Test Split
-# -------------------------------
-print("Splitting data...")
-X = df.drop(columns=["No_show_label"])
-y = df["No_show_label"]
+# =====================================================
+# 3. Fine-tuning LightGBM (Optuna)
+# =====================================================
+def objective(trial, X_train, X_val, y_train, y_val):
+    params = {
+        "objective": "binary",
+        "boosting_type": "gbdt",
+        "verbosity": -1,
+        "num_leaves": trial.suggest_int("num_leaves", 16, 256),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
+        "min_child_samples": trial.suggest_int("min_child_samples", 5, 100),
+        "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
+        "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
+        "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
+        "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 1.0),
+        "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+        "max_depth": trial.suggest_int("max_depth", 3, 8),
+    }
+    model = LGBMClassifier(**params)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_val)
+    return f1_score(y_val, y_pred)
 
-X_train, X_temp, y_train, y_temp = train_test_split(
-    X, y, test_size=0.30, stratify=y, random_state=42
-)
-X_val, X_test, y_val, y_test = train_test_split(
-    X_temp, y_temp, test_size=0.50, stratify=y_temp, random_state=42
-)
+def finetune_lightgbm(X_train, X_val, y_train, y_val):
+    print("Fine-tuning LightGBM with Optuna...")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(lambda trial: objective(trial, X_train, X_val, y_train, y_val), n_trials=30)
+    best_params = study.best_params
+    best_params["n_estimators"] = 500
+    print("✅ Best LGBM params:", best_params)
+    model = LGBMClassifier(**best_params)
+    model.fit(X_train, y_train)
+    return model
 
-print(f"\nSplits -> Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
+# =====================================================
+# 4. Main
+# =====================================================
+def main():
+    dirs = create_dirs()
+    X_train, X_val, y_train, y_val = load_data(dirs)
 
-# -------------------------------
-# 8. Final Data Check and SMOTE
-# -------------------------------
-print("\nApplying SMOTE...")
-smote = SMOTE(random_state=42)
-X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+    # Stage 1: Baseline models
+    baseline_models, baseline_metrics = train_baseline_models(X_train, X_val, y_train, y_val)
+    save_metrics(baseline_metrics, dirs)
 
-print(f"Before SMOTE: {X_train.shape}")
-print(f"After SMOTE: {X_train_res.shape}")
+    # Stage 2: Fine-tuning selected models
+    rf_best = finetune_random_forest(X_train, y_train)
+    rf_metrics = evaluate(rf_best, X_val, y_val, "RandomForest", label="finetuned")
+    joblib.dump(rf_best, dirs["models"] / "randomforest_finetuned.pkl")
 
-# -------------------------------
-# 9. Save Processed Files
-# -------------------------------
-print("\nSaving processed files...")
-processed_dir = ROOT / "data" / "processed"
-processed_dir.mkdir(parents=True, exist_ok=True)
+    lgbm_best = finetune_lightgbm(X_train, X_val, y_train, y_val)
+    lgbm_metrics = evaluate(lgbm_best, X_val, y_val, "LightGBM", label="finetuned")
+    joblib.dump(lgbm_best, dirs["models"] / "lightgbm_finetuned.pkl")
 
-pd.concat([X_train_res, y_train_res], axis=1).to_csv(
-    processed_dir / "train_processed_smote.csv", index=False
-)
-pd.concat([X_val, y_val], axis=1).to_csv(processed_dir / "val_processed.csv", index=False)
-pd.concat([X_test, y_test], axis=1).to_csv(processed_dir / "test_processed.csv", index=False)
+    save_metrics([rf_metrics, lgbm_metrics], dirs)
 
-print("\nPreprocessing completed successfully. Files saved in:", processed_dir)
+    print("\n🏁 Final Metrics Table:")
+    print(pd.read_csv(dirs["results"] / "metrics.csv").sort_values(by="F1", ascending=False))
 
+if __name__ == "__main__":
+    main()
